@@ -57,6 +57,8 @@ virtual_hubs = {
           }]
         }
       }
+    }
+
     bastion = {
       name                  = "bas-cc-cloud"
       subnet_address_prefix = "10.58.136.0/26"
@@ -77,7 +79,6 @@ virtual_hubs = {
           subnet_name = "snet-dns-resolver-outbound"
         }
       }
-    }
     }
   }
 }
