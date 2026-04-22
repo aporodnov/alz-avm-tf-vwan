@@ -41,12 +41,26 @@ module "vwan" {
     }
   }
 
-  # Inject the resource-group ID into every hub so the user
-  # doesn't need to know it at tfvars authoring time.
+  # Inject the resource-group ID and enforce security defaults:
+  #  • internet_security_enabled  = false  on the sidecar VNet connection
+  #  • default_outbound_access_enabled = false  on every sidecar subnet
   virtual_hubs = {
-    for key, hub in var.virtual_hubs : key => merge(hub, {
-      default_parent_id = azurerm_resource_group.vwan.id
-    })
+    for key, hub in var.virtual_hubs : key => merge(hub,
+      { default_parent_id = azurerm_resource_group.vwan.id },
+      try(hub.sidecar_virtual_network, null) != null ? {
+        sidecar_virtual_network = merge(hub.sidecar_virtual_network, {
+          virtual_network_connection_settings = merge(
+            try(hub.sidecar_virtual_network.virtual_network_connection_settings, {}),
+            { internet_security_enabled = false }
+          )
+          subnets = {
+            for sk, sv in try(hub.sidecar_virtual_network.subnets, {}) : sk => merge(sv, {
+              default_outbound_access_enabled = false
+            })
+          }
+        })
+      } : {}
+    )
   }
 
   tags             = var.tags

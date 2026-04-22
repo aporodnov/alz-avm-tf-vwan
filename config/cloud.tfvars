@@ -17,19 +17,17 @@ allow_branch_to_branch_traffic = true
 enable_ddos_protection_plan = false
 virtual_hubs = {
 
-  # ── Canada Central hub (minimal) ──────────────────────────
   "cc-hub" = {
     location = "canadacentral"
 
-    # Toggle which sub-resources get created in this hub.
     enabled_resources = {
       firewall                              = false
       firewall_policy                       = false
-      bastion                               = false
+      bastion                               = true
       virtual_network_gateway_express_route = false
       virtual_network_gateway_vpn           = false
       private_dns_zones                     = false
-      private_dns_resolver                  = false
+      private_dns_resolver                  = true
       sidecar_virtual_network               = true
     }
 
@@ -39,58 +37,47 @@ virtual_hubs = {
       hub_routing_preference                 = "ExpressRoute"
       virtual_router_auto_scale_min_capacity = 2
     }
-
-    # ── Sidecar Virtual Network ─────────────────────────────
-    # A /24 VNet peered to the hub for Azure Bastion and
-    # Private DNS Resolver (inbound + outbound endpoints).
     sidecar_virtual_network = {
       name          = "vnet-sidecar-cc-cloud"
       address_space = ["10.58.136.0/24"]
 
       virtual_network_connection_settings = {
-        name                      = "vnet-conn-sidecar-cc-cloud"
-        internet_security_enabled = false
+        name = "vnet-conn-sidecar-cc-cloud"
       }
 
       subnets = {
-        # Azure Bastion requires /26 minimum and the exact name
-        # "AzureBastionSubnet".
-        "bastion" = {
-          name                            = "AzureBastionSubnet"
-          address_prefixes                = ["10.58.136.0/26"]
-          default_outbound_access_enabled = false
-        }
-
-        # Private DNS Resolver inbound endpoint — /28 minimum,
-        # delegation to Microsoft.Network/dnsResolvers required.
-        "dns-resolver-inbound" = {
-          name                            = "snet-dns-resolver-inbound"
-          address_prefixes                = ["10.58.136.64/28"]
-          default_outbound_access_enabled = false
-          delegations = [{
-            name = "Microsoft.Network.dnsResolvers"
-            service_delegation = {
-              name    = "Microsoft.Network/dnsResolvers"
-              actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
-            }
-          }]
-        }
-
-        # Private DNS Resolver outbound endpoint — /28 minimum,
-        # delegation to Microsoft.Network/dnsResolvers required.
         "dns-resolver-outbound" = {
-          name                            = "snet-dns-resolver-outbound"
-          address_prefixes                = ["10.58.136.80/28"]
-          default_outbound_access_enabled = false
+          name             = "snet-dns-resolver-outbound"
+          address_prefixes = ["10.58.136.80/28"]
           delegations = [{
             name = "Microsoft.Network.dnsResolvers"
             service_delegation = {
-              name    = "Microsoft.Network/dnsResolvers"
-              actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
+              name = "Microsoft.Network/dnsResolvers"
             }
           }]
         }
       }
+    bastion = {
+      name                  = "bas-cc-cloud"
+      subnet_address_prefix = "10.58.136.0/26"
+      sku                   = "Standard"
+      copy_paste_enabled    = true
+      file_copy_enabled     = true
+      ip_connect_enabled    = true
+      tunneling_enabled     = true
+      scale_units           = 2
+    }
+
+    private_dns_resolver = {
+      name                  = "dnspr-cc-cloud"
+      subnet_name           = "snet-dns-resolver-inbound"
+      subnet_address_prefix = "10.58.136.64/28"
+      outbound_endpoints = {
+        "default" = {
+          subnet_name = "snet-dns-resolver-outbound"
+        }
+      }
+    }
     }
   }
 }
