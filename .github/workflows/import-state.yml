@@ -58,6 +58,52 @@ jobs:
             -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
             -backend-config="key=${TF_BACKEND_KEY}"
 
+      - name: Remove Stale azapi Resources from State
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # The azapi provider crashes with "Missing Resource Identity
+          # After Read" when refreshing state for resources that were
+          # deleted outside of Terraform (e.g. from the Azure portal).
+          # This step detects those stale entries and removes them from
+          # state so subsequent plan/import runs cleanly.
+
+          SUB_ID="${ARM_SUBSCRIPTION_ID}"
+          REMOVED=0
+
+          echo "Scanning state for stale azapi resources..."
+          AZAPI_ENTRIES=$(terraform state list 2>/dev/null | grep 'azapi_resource\.' || true)
+
+          if [[ -z "$AZAPI_ENTRIES" ]]; then
+            echo "No azapi resources in state — nothing to clean."
+            exit 0
+          fi
+
+          while IFS= read -r ADDR; do
+            # Extract the Azure resource ID from state
+            RESOURCE_ID=$(terraform state show "$ADDR" 2>/dev/null \
+              | grep '^\s*id\s*=' | head -1 \
+              | sed 's/.*"\(.*\)"/\1/' || true)
+
+            if [[ -z "$RESOURCE_ID" ]]; then
+              echo "⏭  $ADDR — could not read ID from state, skipping"
+              continue
+            fi
+
+            # Check if the resource still exists in Azure
+            if az resource show --ids "$RESOURCE_ID" --subscription "$SUB_ID" &>/dev/null; then
+              echo "✓  $ADDR — exists in Azure"
+            else
+              echo "🗑  $ADDR — deleted from Azure, removing from state"
+              terraform state rm "$ADDR" 2>/dev/null || true
+              REMOVED=$((REMOVED + 1))
+            fi
+          done <<< "$AZAPI_ENTRIES"
+
+          echo ""
+          echo "Cleanup complete: removed $REMOVED stale resource(s) from state."
+
       - name: Detect & Import Existing Resources
         run: |
           #!/usr/bin/env bash
@@ -265,6 +311,38 @@ jobs:
           echo "========================================="
           echo " Import complete: $TOTAL_IMPORTED resource(s) adopted"
           echo "========================================="
+
+      - name: Remove Remaining Stale Resources from State
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # Second cleanup pass — catches any azapi resources that
+          # became stale during the import loop (e.g. parent imported
+          # but child subnets were deleted from Azure).
+          SUB_ID="${ARM_SUBSCRIPTION_ID}"
+          REMOVED=0
+
+          AZAPI_ENTRIES=$(terraform state list 2>/dev/null | grep 'azapi_resource\.' || true)
+          if [[ -z "$AZAPI_ENTRIES" ]]; then
+            echo "No stale azapi resources."
+            exit 0
+          fi
+
+          while IFS= read -r ADDR; do
+            RESOURCE_ID=$(terraform state show "$ADDR" 2>/dev/null \
+              | grep '^\s*id\s*=' | head -1 \
+              | sed 's/.*"\(.*\)"/\1/' || true)
+            if [[ -n "$RESOURCE_ID" ]]; then
+              if ! az resource show --ids "$RESOURCE_ID" --subscription "$SUB_ID" &>/dev/null; then
+                echo "🗑  $ADDR — removing stale entry"
+                terraform state rm "$ADDR" 2>/dev/null || true
+                REMOVED=$((REMOVED + 1))
+              fi
+            fi
+          done <<< "$AZAPI_ENTRIES"
+
+          echo "Removed $REMOVED stale resource(s)."
 
       - name: Final Plan (verify)
         run: terraform plan -var-file="${TFVARS_FILE}"
