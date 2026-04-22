@@ -1,0 +1,75 @@
+name: Deploy - vWAN Network
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        type: choice
+        description: Target vWAN profile (selects tfvars file and subscription)
+        required: true
+        default: Hybrid
+        options:
+          - Hybrid
+          - Cloud
+      mode:
+        type: choice
+        description: Run a Plan preview or Apply for real
+        required: true
+        default: Plan
+        options:
+          - Plan
+          - Apply
+
+env:
+  TFVARS_FILE: ${{ inputs.profile == 'Hybrid' && 'config/hybrid.tfvars' || 'config/cloud.tfvars' }}
+  ARM_SUBSCRIPTION_ID: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_AZURE_SUBSCRIPTION_ID || vars.CLOUD_AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ vars.VWAN_SPN_CLIENT_ID }}
+  ARM_USE_OIDC: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    if: inputs.mode == 'Plan'
+    environment: ${{ github.ref == 'refs/heads/main' && 'Prod' || 'Lab' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: terraform plan -var-file="${TFVARS_FILE}"
+
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    if: inputs.mode == 'Apply'
+    environment: ${{ github.ref == 'refs/heads/main' && 'Prod' || 'Lab' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply
+        run: terraform apply -var-file="${TFVARS_FILE}" -auto-approve
