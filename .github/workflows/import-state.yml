@@ -140,26 +140,60 @@ jobs:
               # ── Check Azure for existing resource ─────
               if [[ "$TYPE" == "azurerm_resource_group" ]]; then
                 RESOURCE_ID="/subscriptions/${SUB_ID}/resourceGroups/${NAME}"
-                if az group show --name "$NAME" &>/dev/null; then
+                if az group show --name "$NAME" --subscription "$SUB_ID" &>/dev/null; then
                   EXISTS=true
                 fi
 
               elif [[ -n "$RG" ]]; then
                 # RG name known — build ID directly
                 RESOURCE_ID="/subscriptions/${SUB_ID}/resourceGroups/${RG}/providers/${AZ_TYPE}/${NAME}"
-                if az resource show --ids "$RESOURCE_ID" &>/dev/null; then
+                if az resource show --ids "$RESOURCE_ID" --subscription "$SUB_ID" &>/dev/null; then
                   EXISTS=true
                 fi
 
               else
                 # RG unknown — discover by name + type across the subscription
+                echo "  🔍 Searching subscription ${SUB_ID} for ${AZ_TYPE}/${NAME}..."
                 FOUND_ID=$(az resource list \
                   --name "$NAME" \
                   --resource-type "$AZ_TYPE" \
+                  --subscription "$SUB_ID" \
                   --query "[0].id" -o tsv 2>/dev/null || true)
                 if [[ -n "$FOUND_ID" ]]; then
                   RESOURCE_ID="$FOUND_ID"
                   EXISTS=true
+                else
+                  echo "  🔍 Not found via az resource list, trying direct ID..."
+                  # Try all RGs from the plan for this resource type
+                  POSSIBLE_RGS=$(jq -r '[
+                    .resource_changes[] |
+                    select(.change.actions == ["create"]) |
+                    select(.type == "azurerm_resource_group") |
+                    .change.after.name // empty
+                  ] | unique[]' plan.json 2>/dev/null || true)
+                  for POSSIBLE_RG in $POSSIBLE_RGS; do
+                    TRY_ID="/subscriptions/${SUB_ID}/resourceGroups/${POSSIBLE_RG}/providers/${AZ_TYPE}/${NAME}"
+                    if az resource show --ids "$TRY_ID" --subscription "$SUB_ID" &>/dev/null; then
+                      RESOURCE_ID="$TRY_ID"
+                      EXISTS=true
+                      break
+                    fi
+                  done
+                  # Also try with RGs already in state
+                  if ! $EXISTS; then
+                    STATE_RGS=$(terraform state list 2>/dev/null \
+                      | grep 'azurerm_resource_group\.' \
+                      | xargs -I{} terraform state show {} 2>/dev/null \
+                      | grep '^\s*name\s*=' | sed 's/.*"\(.*\)"/\1/' || true)
+                    for STATE_RG in $STATE_RGS; do
+                      TRY_ID="/subscriptions/${SUB_ID}/resourceGroups/${STATE_RG}/providers/${AZ_TYPE}/${NAME}"
+                      if az resource show --ids "$TRY_ID" --subscription "$SUB_ID" &>/dev/null; then
+                        RESOURCE_ID="$TRY_ID"
+                        EXISTS=true
+                        break
+                      fi
+                    done
+                  fi
                 fi
               fi
 
