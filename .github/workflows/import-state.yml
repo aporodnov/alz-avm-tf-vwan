@@ -169,7 +169,7 @@ jobs:
                 echo "  Azure ID:  $RESOURCE_ID"
                 if terraform import -var-file="${TFVARS_FILE}" "$ADDRESS" "$RESOURCE_ID"; then
                   echo "  ✅ Imported"
-                  ((PASS_IMPORTED++))
+                  PASS_IMPORTED=$((PASS_IMPORTED + 1))
                 else
                   echo "  ❌ Import failed — may need manual intervention"
                 fi
