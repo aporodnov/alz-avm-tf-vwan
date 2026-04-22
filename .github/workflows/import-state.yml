@@ -1,0 +1,197 @@
+name: Import - Adopt Existing Azure Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        type: choice
+        description: Target vWAN profile (selects tfvars file and subscription)
+        required: true
+        default: Hybrid
+        options:
+          - Hybrid
+          - Cloud
+
+env:
+  TFVARS_FILE: ${{ inputs.profile == 'Hybrid' && 'config/hybrid.tfvars' || 'config/cloud.tfvars' }}
+  TF_BACKEND_RG: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_TF_STATE_RG || vars.CLOUD_TF_STATE_RG }}
+  TF_BACKEND_SA: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_TF_STATE_SA || vars.CLOUD_TF_STATE_SA }}
+  TF_BACKEND_CONTAINER: tfstate
+  TF_BACKEND_KEY: ${{ inputs.profile == 'Hybrid' && 'vwan-hybrid.tfstate' || 'vwan-cloud.tfstate' }}
+  ARM_SUBSCRIPTION_ID: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_AZURE_SUBSCRIPTION_ID || vars.CLOUD_AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ vars.VWAN_SPN_CLIENT_ID }}
+  ARM_USE_OIDC: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  import:
+    name: Detect & Import
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'Prod' || 'Lab' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+          terraform_wrapper: false   # required — wrapper breaks JSON parsing
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.VWAN_SPN_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${TF_BACKEND_RG}" \
+            -backend-config="storage_account_name=${TF_BACKEND_SA}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
+            -backend-config="key=${TF_BACKEND_KEY}"
+
+      - name: Detect & Import Existing Resources
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          SUB_ID="${ARM_SUBSCRIPTION_ID}"
+          TOTAL_IMPORTED=0
+          MAX_PASSES=3
+
+          # ── Azure resource-type lookup table ────────────────────
+          declare -A AZ_TYPES=(
+            [azurerm_resource_group]="__rg__"
+            [azurerm_virtual_wan]="Microsoft.Network/virtualWans"
+            [azurerm_virtual_hub]="Microsoft.Network/virtualHubs"
+            [azurerm_express_route_gateway]="Microsoft.Network/expressRouteGateways"
+            [azurerm_vpn_gateway]="Microsoft.Network/vpnGateways"
+            [azurerm_firewall]="Microsoft.Network/azureFirewalls"
+            [azurerm_firewall_policy]="Microsoft.Network/firewallPolicies"
+            [azurerm_bastion_host]="Microsoft.Network/bastionHosts"
+            [azurerm_virtual_network]="Microsoft.Network/virtualNetworks"
+            [azurerm_network_ddos_protection_plan]="Microsoft.Network/ddosProtectionPlans"
+            [azurerm_public_ip]="Microsoft.Network/publicIPAddresses"
+          )
+
+          for PASS in $(seq 1 $MAX_PASSES); do
+            echo ""
+            echo "========================================="
+            echo " Pass ${PASS} / ${MAX_PASSES}"
+            echo "========================================="
+
+            # ── Plan ────────────────────────────────────
+            terraform plan -out=tfplan -var-file="${TFVARS_FILE}" 2>&1 | tail -20
+            terraform show -json tfplan > plan.json
+
+            # ── Extract azurerm resources planned for creation ──
+            CREATES=$(jq -c '[
+              .resource_changes[] |
+              select(.change.actions == ["create"]) |
+              select(.type | startswith("azurerm_")) |
+              {
+                address: .address,
+                type:    .type,
+                name:    .change.after.name,
+                rg:      .change.after.resource_group_name,
+                location:.change.after.location
+              }
+            ]' plan.json)
+
+            COUNT=$(echo "$CREATES" | jq 'length')
+            if [[ "$COUNT" -eq 0 ]]; then
+              echo "✅ No Azure resources to create — state is fully reconciled."
+              break
+            fi
+            echo "Found $COUNT Azure resource(s) planned for creation."
+
+            PASS_IMPORTED=0
+            for i in $(seq 0 $((COUNT - 1))); do
+              RESOURCE=$(echo "$CREATES" | jq -c ".[$i]")
+              ADDRESS=$(echo "$RESOURCE" | jq -r '.address')
+              TYPE=$(echo "$RESOURCE"    | jq -r '.type')
+              NAME=$(echo "$RESOURCE"    | jq -r '.name // empty')
+              RG=$(echo "$RESOURCE"      | jq -r '.rg // empty')
+
+              # Skip if name unknown at plan time
+              if [[ -z "$NAME" ]]; then
+                echo "⏭  $ADDRESS — name not known at plan time, skipping"
+                continue
+              fi
+
+              # Skip unsupported resource types
+              if [[ ! -v "AZ_TYPES[$TYPE]" ]]; then
+                echo "⏭  $ADDRESS — unsupported type ($TYPE), skipping"
+                continue
+              fi
+
+              AZ_TYPE="${AZ_TYPES[$TYPE]}"
+              RESOURCE_ID=""
+              EXISTS=false
+
+              # ── Check Azure for existing resource ─────
+              if [[ "$TYPE" == "azurerm_resource_group" ]]; then
+                RESOURCE_ID="/subscriptions/${SUB_ID}/resourceGroups/${NAME}"
+                if az group show --name "$NAME" &>/dev/null; then
+                  EXISTS=true
+                fi
+
+              elif [[ -n "$RG" ]]; then
+                # RG name known — build ID directly
+                RESOURCE_ID="/subscriptions/${SUB_ID}/resourceGroups/${RG}/providers/${AZ_TYPE}/${NAME}"
+                if az resource show --ids "$RESOURCE_ID" &>/dev/null; then
+                  EXISTS=true
+                fi
+
+              else
+                # RG unknown — discover by name + type across the subscription
+                FOUND_ID=$(az resource list \
+                  --name "$NAME" \
+                  --resource-type "$AZ_TYPE" \
+                  --query "[0].id" -o tsv 2>/dev/null || true)
+                if [[ -n "$FOUND_ID" ]]; then
+                  RESOURCE_ID="$FOUND_ID"
+                  EXISTS=true
+                fi
+              fi
+
+              # ── Import or skip ────────────────────────
+              if $EXISTS; then
+                echo "→ Importing: $ADDRESS"
+                echo "  Azure ID:  $RESOURCE_ID"
+                if terraform import "$ADDRESS" "$RESOURCE_ID"; then
+                  echo "  ✅ Imported"
+                  ((PASS_IMPORTED++))
+                else
+                  echo "  ❌ Import failed — may need manual intervention"
+                fi
+              else
+                echo "✓  $ADDRESS ($NAME) — not found in Azure, will be created"
+              fi
+            done
+
+            TOTAL_IMPORTED=$((TOTAL_IMPORTED + PASS_IMPORTED))
+
+            if [[ "$PASS_IMPORTED" -eq 0 ]]; then
+              echo ""
+              echo "No new imports this pass — remaining resources are genuinely new."
+              break
+            fi
+            echo "Imported $PASS_IMPORTED resource(s) this pass. Re-planning to resolve dependencies..."
+          done
+
+          echo ""
+          echo "========================================="
+          echo " Import complete: $TOTAL_IMPORTED resource(s) adopted"
+          echo "========================================="
+
+      - name: Final Plan (verify)
+        run: terraform plan -var-file="${TFVARS_FILE}"
