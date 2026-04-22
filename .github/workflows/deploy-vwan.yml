@@ -22,6 +22,10 @@ on:
 
 env:
   TFVARS_FILE: ${{ inputs.profile == 'Hybrid' && 'config/hybrid.tfvars' || 'config/cloud.tfvars' }}
+  TF_BACKEND_RG: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_TF_STATE_RG || vars.CLOUD_TF_STATE_RG }}
+  TF_BACKEND_SA: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_TF_STATE_SA || vars.CLOUD_TF_STATE_SA }}
+  TF_BACKEND_CONTAINER: tfstate
+  TF_BACKEND_KEY: ${{ inputs.profile == 'Hybrid' && 'vwan-hybrid.tfstate' || 'vwan-cloud.tfstate' }}
   ARM_SUBSCRIPTION_ID: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_AZURE_SUBSCRIPTION_ID || vars.CLOUD_AZURE_SUBSCRIPTION_ID }}
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   ARM_CLIENT_ID: ${{ vars.VWAN_SPN_CLIENT_ID }}
@@ -48,7 +52,12 @@ jobs:
           terraform_version: "~> 1.9"
 
       - name: Terraform Init
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${TF_BACKEND_RG}" \
+            -backend-config="storage_account_name=${TF_BACKEND_SA}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
+            -backend-config="key=${TF_BACKEND_KEY}"
 
       - name: Terraform Plan
         run: terraform plan -var-file="${TFVARS_FILE}"
@@ -69,7 +78,12 @@ jobs:
           terraform_version: "~> 1.9"
 
       - name: Terraform Init
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${TF_BACKEND_RG}" \
+            -backend-config="storage_account_name=${TF_BACKEND_SA}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
+            -backend-config="key=${TF_BACKEND_KEY}"
 
       - name: Terraform Apply
         run: terraform apply -var-file="${TFVARS_FILE}" -auto-approve

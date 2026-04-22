@@ -14,6 +14,8 @@ virtual_wan_name               = "vwan01"
 virtual_wan_type               = "Standard"
 allow_branch_to_branch_traffic = true
 
+enable_ddos_protection_plan = false
+
 virtual_hubs = {
 
   # ── Canada Central hub ────────────────────────────────────

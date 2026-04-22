@@ -20,6 +20,10 @@ module "vwan" {
   version = "0.14.0"
 
   virtual_wan_settings = {
+    enabled_resources = {
+      ddos_protection_plan = var.enable_ddos_protection_plan
+    }
+
     virtual_wan = {
       name                           = var.virtual_wan_name
       location                       = var.location
@@ -27,6 +31,13 @@ module "vwan" {
       type                           = var.virtual_wan_type
       allow_branch_to_branch_traffic = var.allow_branch_to_branch_traffic
       tags                           = var.tags
+    }
+
+    ddos_protection_plan = {
+      name                = "ddos-plan-${var.virtual_wan_name}"
+      location            = var.location
+      resource_group_name = azurerm_resource_group.vwan.name
+      tags                = var.tags
     }
   }
 

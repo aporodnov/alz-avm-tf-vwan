@@ -42,6 +42,14 @@ variable "virtual_hubs" {
   description = "Map of virtual hubs to create. See config/*.tfvars for examples."
 }
 
+# ── DDoS Protection ───────────────────────────────────────────
+
+variable "enable_ddos_protection_plan" {
+  type        = bool
+  default     = false
+  description = "Deploy an Azure DDoS Protection Plan and associate it with hub virtual networks."
+}
+
 # ── Telemetry ─────────────────────────────────────────────────
 
 variable "enable_telemetry" {

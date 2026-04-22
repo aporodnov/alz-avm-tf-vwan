@@ -12,14 +12,13 @@ terraform {
     }
   }
 
-  # ── Remote state (uncomment for production) ───────────────
-  # backend "azurerm" {
-  #   resource_group_name  = "terraform-state-rg"
-  #   storage_account_name = "tfstatevwan"
-  #   container_name       = "tfstate"
-  #   key                  = "vwan.terraform.tfstate"
-  #   use_oidc             = true
-  # }
+  # ── Remote state ──────────────────────────────────────────
+  # All backend values are supplied at init time via
+  # -backend-config so each profile (Hybrid / Cloud) can
+  # target its own subscription, storage account, and state file.
+  backend "azurerm" {
+    use_oidc = true
+  }
 }
 
 provider "azurerm" {
