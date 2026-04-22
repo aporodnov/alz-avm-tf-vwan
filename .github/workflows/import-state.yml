@@ -167,7 +167,7 @@ jobs:
               if $EXISTS; then
                 echo "→ Importing: $ADDRESS"
                 echo "  Azure ID:  $RESOURCE_ID"
-                if terraform import "$ADDRESS" "$RESOURCE_ID"; then
+                if terraform import -var-file="${TFVARS_FILE}" "$ADDRESS" "$RESOURCE_ID"; then
                   echo "  ✅ Imported"
                   ((PASS_IMPORTED++))
                 else
