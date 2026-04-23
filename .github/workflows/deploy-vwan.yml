@@ -59,28 +59,17 @@ jobs:
             -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
             -backend-config="key=${TF_BACKEND_KEY}"
 
-      - name: Terraform Plan
-        id: plan
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.VWAN_SPN_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Plan & Sync State
         run: |
-          set -o pipefail
-
-          # Filter AVM telemetry noise from output
-          tf_quiet() {
-            grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)' || true
-          }
-
-          # Plan with full refresh — syncs state with Azure before planning
-          terraform plan -var-file="${TFVARS_FILE}" -out=tfplan 2>&1 | tf_quiet
-
-          # Safety check: warn if plan destroys resources
-          DESTROY_COUNT=$(terraform show -json tfplan \
-            | jq '[.resource_changes[] | select(.change.actions[] == "delete")] | length')
-          if [[ "$DESTROY_COUNT" -gt 0 ]]; then
-            echo "::warning::⚠️ Plan will DESTROY $DESTROY_COUNT resource(s) — review carefully!"
-          fi
-
-          # Show plan summary
-          terraform show tfplan 2>&1 | tf_quiet | tail -5
+          chmod +x scripts/auto-import.sh
+          scripts/auto-import.sh "${TFVARS_FILE}"
 
       - name: Upload Plan Artifact
         if: inputs.mode == 'Plan & Apply'
