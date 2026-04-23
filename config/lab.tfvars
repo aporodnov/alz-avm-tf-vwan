@@ -52,6 +52,15 @@ virtual_hubs = {
         scale_unit = 1
       }
     }
+    express_route_circuit_connections = {
+      # "er-conn-toronto-dc" = {
+      #   name                             = "erconn-toronto-dc"
+      #   express_route_circuit_peering_id = "/subscriptions/<ER-circuit-subscription-id>/resourceGroups/<ER-circuit-RG>/providers/Microsoft.Network/expressRouteCircuits/<ER-circuit-name>/peerings/AzurePrivatePeering"
+      #   authorization_key                = "<authorization-key-from-er-circuit>"  # Replace with actual key
+      #   enable_internet_security         = false
+      #   routing_weight                   = 0
+      # }
+    }
 
     # ── VPN Sites (on-prem branch locations) ──
     vpn_sites = {
