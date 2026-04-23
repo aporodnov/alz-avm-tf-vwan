@@ -13,12 +13,12 @@ on:
           - Lab
       mode:
         type: choice
-        description: Run a Plan preview or Apply for real
+        description: Plan only, or Plan then Apply the saved plan
         required: true
         default: Plan
         options:
           - Plan
-          - Apply
+          - Plan & Apply
 
 env:
   TFVARS_FILE: ${{ inputs.profile == 'Prod' && 'config/prod.tfvars' || 'config/lab.tfvars' }}
@@ -39,7 +39,6 @@ jobs:
   plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
-    if: inputs.mode == 'Plan'
     environment: ${{ github.ref == 'refs/heads/main' && 'Prod' || 'Lab' }}
 
     steps:
@@ -50,6 +49,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~> 1.9"
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: |
@@ -60,12 +60,21 @@ jobs:
             -backend-config="key=${TF_BACKEND_KEY}"
 
       - name: Terraform Plan
-        run: terraform plan -var-file="${TFVARS_FILE}"
+        run: terraform plan -var-file="${TFVARS_FILE}" -out=tfplan
+
+      - name: Upload Plan Artifact
+        if: inputs.mode == 'Plan & Apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.profile }}
+          path: tfplan
+          retention-days: 1
 
   apply:
     name: Terraform Apply
+    needs: plan
+    if: inputs.mode == 'Plan & Apply'
     runs-on: ubuntu-latest
-    if: inputs.mode == 'Apply'
     environment: ${{ github.ref == 'refs/heads/main' && 'Prod' || 'Lab' }}
 
     steps:
@@ -76,6 +85,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~> 1.9"
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: |
@@ -85,5 +95,10 @@ jobs:
             -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
             -backend-config="key=${TF_BACKEND_KEY}"
 
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.profile }}
+
       - name: Terraform Apply
-        run: terraform apply -var-file="${TFVARS_FILE}" -auto-approve
+        run: terraform apply tfplan
