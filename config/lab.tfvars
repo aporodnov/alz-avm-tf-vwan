@@ -1,13 +1,15 @@
 # ─────────────────────────────────────────────────────────────
-# Lab profile — cloud-only (no on-prem connectivity)
+# Lab profile
 # ─────────────────────────────────────────────────────────────
 
 networking_resource_group_name = "AVNM-RG"
+dns_resource_group_name = "DNS-RG"
+
 location            = "canadacentral"
 
 tags = {
-  Environment  = "Prod"
-  SolutionName = "Cloud Vwan"
+  Environment  = "Lab"
+  SolutionName = "Connectivity"
 }
 
 virtual_wan_name               = "vwan01"
@@ -16,7 +18,7 @@ allow_branch_to_branch_traffic = true
 
 enable_ddos_protection_plan = false
 enable_telemetry            = false
-dns_resource_group_name = "DNS-RG"
+
 virtual_hubs = {
 
   "cc-hub" = {
@@ -50,6 +52,54 @@ virtual_hubs = {
         scale_unit = 1
       }
     }
+
+    # ── VPN Sites (on-prem branch locations) ──
+    vpn_sites = {
+      "branch-toronto" = {
+        name = "vpnsite-branch-toronto"
+        links = [{
+          name       = "isp-primary"
+          ip_address = "203.0.113.1"      # Replace with your on-prem device public IP
+          speed_in_mbps = 100
+          bgp = {
+            asn             = 65010
+            peering_address = "10.100.0.1"  # On-prem BGP peer IP
+          }
+        }]
+        address_cidrs = ["10.100.0.0/16"]   # On-prem address space
+        device_vendor = "Cisco"
+        device_model  = "ISR4451"
+      }
+    }
+
+    # ── VPN Site Connections (link sites to the hub VPN gateway) ──
+    vpn_site_connections = {
+      "conn-branch-toronto" = {
+        name                = "vpnconn-branch-toronto"
+        remote_vpn_site_key = "branch-toronto"
+        vpn_links = [{
+          name                 = "link-isp-primary"
+          vpn_site_link_number = 0
+          vpn_site_key         = "branch-toronto"
+          bandwidth_mbps       = 100
+          bgp_enabled          = true
+          protocol             = "IKEv2"
+          shared_key           = "YourPreSharedKey123!"  # Replace with a real PSK or use Key Vault reference
+          ipsec_policy = {
+            dh_group                 = "DHGroup14"
+            ike_encryption_algorithm = "AES256"
+            ike_integrity_algorithm  = "SHA256"
+            encryption_algorithm     = "AES256"
+            integrity_algorithm      = "SHA256"
+            pfs_group                = "PFS14"
+            sa_data_size_kb          = "102400000"
+            sa_lifetime_sec          = "3600"
+          }
+        }]
+        internet_security_enabled = false
+      }
+    }
+
     sidecar_virtual_network = {
       name          = "vnet-sidecar-cc-cloud"
       address_space = ["10.58.136.0/24"]
