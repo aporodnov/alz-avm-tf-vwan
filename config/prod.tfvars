@@ -121,6 +121,7 @@ virtual_hubs = {
       }
       outbound_endpoints = {
         "default" = {
+          name        = "oe-cc-hybrid"
           subnet_name = "snet-dns-resolver-outbound"
           forwarding_ruleset = {
             "default" = {

@@ -21,7 +21,7 @@ enable_telemetry            = false
 
 virtual_hubs = {
 
-  "cc-hub" = {
+  "cc-hub01" = {
     location = "canadacentral"
 
     enabled_resources = {
@@ -176,6 +176,7 @@ virtual_hubs = {
       }
       outbound_endpoints = {
         "default" = {
+          name        = "oe-cc-cloud"
           subnet_name = "snet-dns-resolver-outbound"
           forwarding_ruleset = {
             "default" = {
@@ -192,6 +193,67 @@ virtual_hubs = {
               }
             }
           }
+        }
+      }
+    }
+  }
+  "ce-hub01" = {
+    location = "canadaeast"
+
+    enabled_resources = {
+      firewall                              = false
+      firewall_policy                       = false
+      bastion                               = false
+      virtual_network_gateway_express_route = false
+      virtual_network_gateway_vpn           = false
+      private_dns_zones                     = false
+      private_dns_resolver                  = false
+      sidecar_virtual_network               = true
+    }
+
+    hub = {
+      name                                   = "vHUB-CE"
+      address_prefix                         = "10.70.128.0/21"
+      hub_routing_preference                 = "ExpressRoute"
+      virtual_router_auto_scale_min_capacity = 2
+    }
+
+    sidecar_virtual_network = {
+      name          = "vnet-sidecar-ce-cloud"
+      address_space = ["10.77.0.0/24"]
+
+      virtual_network_connection_settings = {
+        name = "vnet-conn-sidecar-ce-cloud"
+      }
+
+      subnets = {
+        "dns-resolver-outbound" = {
+          name             = "snet-dns-resolver-outbound"
+          address_prefixes = ["10.77.0.80/28"]
+          delegations = [{
+            name = "Microsoft.Network.dnsResolvers"
+            service_delegation = {
+              name = "Microsoft.Network/dnsResolvers"
+            }
+          }]
+        }
+      }
+    }
+    private_dns_resolver = {
+      name                             = "dnspr-ce-cloud"
+      default_inbound_endpoint_enabled = false
+      subnet_name                      = "snet-dns-resolver-inbound"
+      subnet_address_prefix            = "10.77.0.64/28"
+      inbound_endpoints = {
+        "default" = {
+          name        = "ie-ce-cloud"
+          subnet_name = "snet-dns-resolver-inbound"
+        }
+      }
+      outbound_endpoints = {
+        "default" = {
+          name        = "oe-ce-cloud"
+          subnet_name = "snet-dns-resolver-outbound"
         }
       }
     }
