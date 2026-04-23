@@ -68,15 +68,39 @@ virtual_hubs = {
       ip_connect_enabled    = true
       tunneling_enabled     = true
       scale_units           = 2
+
+      bastion_public_ip = {
+        name = "pip-bas-cc-cloud"
+      }
     }
 
     private_dns_resolver = {
-      name                  = "dnspr-cc-cloud"
-      subnet_name           = "snet-dns-resolver-inbound"
-      subnet_address_prefix = "10.58.136.64/28"
+      name                            = "dnspr-cc-cloud"
+      subnet_name                     = "snet-dns-resolver-inbound"
+      subnet_address_prefix           = "10.58.136.64/28"
+      default_inbound_endpoint_enabled = false
+      inbound_endpoints = {
+        "default" = {
+          name        = "ie-cc-cloud"
+          subnet_name = "snet-dns-resolver-inbound"
+        }
+      }
       outbound_endpoints = {
         "default" = {
           subnet_name = "snet-dns-resolver-outbound"
+          forwarding_ruleset = {
+            "default" = {
+              name = "frs-cc-cloud"
+              rules = {
+                "onprem-contoso" = {
+                  domain_name              = "contoso.local."
+                  destination_ip_addresses = {
+                    "10.0.0.53" = "53"
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
