@@ -66,16 +66,17 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
 
-      - name: Discover Existing Resources
+      - name: Discover & Plan
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
 
           SUB_ID="${ARM_SUBSCRIPTION_ID}"
           IMPORTS_FILE="imports_generated.tf"
-          rm -f "$IMPORTS_FILE"
+          MAX_PASSES=4
+          rm -f "$IMPORTS_FILE" tfplan plan.json
 
-          # Filter noisy telemetry lines from terraform output
+          # Filter noisy telemetry/data-source reads
           tf_quiet() {
             grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)' || true
           }
@@ -90,6 +91,7 @@ jobs:
               return 1
             fi
 
+            # azapi_resource with known parent — build ID directly (fast path)
             if [[ "$tf_type" == "azapi_resource" && -n "$parent_id" && -n "$azapi_type" ]]; then
               local segs id
               segs=$(echo "$azapi_type" | tr '/' '\n' | wc -l)
@@ -102,12 +104,15 @@ jobs:
               return 1
             fi
 
+            # azurerm_* — search by name, scoped to RG when known
             local found=""
             if [[ -n "$rg" ]]; then
               found=$(az resource list --name "$name" -g "$rg" --subscription "$SUB_ID" \
                       --query "[0].id" -o tsv 2>/dev/null || true)
             fi
-            if [[ -z "$found" ]]; then
+            # Only fall back to subscription-wide search for resource groups
+            # (avoids false-positive name collisions across RGs)
+            if [[ -z "$found" && -z "$rg" ]]; then
               found=$(az resource list --name "$name" --subscription "$SUB_ID" \
                       --query "[0].id" -o tsv 2>/dev/null || true)
             fi
@@ -115,15 +120,33 @@ jobs:
             return 1
           }
 
-          echo "Discovering resources that exist in Azure but not in state..."
+          # Multi-pass: each pass discovers resources, writes import blocks,
+          # then re-plans so child resources (e.g. subnets under a VNet)
+          # get their parent_id resolved in the next pass.
+          TOTAL_IMPORTS=0
 
-          # Run a throwaway plan to find what Terraform wants to create
-          terraform plan -out=_discovery.tfplan -refresh=false \
-            -var-file="${TFVARS_FILE}" 2>&1 | tf_quiet | tail -5 || true
+          for PASS in $(seq 1 $MAX_PASSES); do
+            echo ""
+            echo "═══════════════════════════════════════"
+            echo " Discovery pass ${PASS} / ${MAX_PASSES}"
+            echo "═══════════════════════════════════════"
 
-          if [[ ! -f _discovery.tfplan ]]; then
-            echo "Plan did not produce output — skipping discovery"
-          elif terraform show -json _discovery.tfplan > _discovery.json 2>/dev/null; then
+            rm -f tfplan plan.json
+
+            # Capture plan output for error reporting; don't fail the loop
+            PLAN_OUTPUT=$(terraform plan -out=tfplan -var-file="${TFVARS_FILE}" 2>&1) || true
+            echo "$PLAN_OUTPUT" | tf_quiet | tail -15
+
+            if [[ ! -f tfplan ]]; then
+              if [[ $PASS -lt $MAX_PASSES && $TOTAL_IMPORTS -gt 0 ]]; then
+                echo "⚠️  Plan failed — retrying next pass after previous imports settle..."
+                continue
+              fi
+              echo "❌ Plan failed to produce output"
+              echo "$PLAN_OUTPUT" | tf_quiet | grep -iE 'Error:|error:' | head -10 || true
+              exit 1
+            fi
+            terraform show -json tfplan > plan.json 2>/dev/null
 
             CREATES=$(jq -c '[
               .resource_changes[]
@@ -141,11 +164,17 @@ jobs:
                                then .change.after.parent_id
                                else null end)
                 }
-            ]' _discovery.json)
+            ]' plan.json)
 
             COUNT=$(echo "$CREATES" | jq 'length')
-            FOUND=0
+            if [[ "$COUNT" -eq 0 ]]; then
+              echo "✅ No resources to create — state is in sync"
+              break
+            fi
 
+            # Batch Azure lookups: collect all azapi_resource IDs to check in
+            # one az resource list call per resource group for speed.
+            PASS_IMPORTS=0
             for i in $(seq 0 $((COUNT - 1))); do
               ROW=$(echo "$CREATES" | jq -c ".[$i]")
               ADDR=$(echo "$ROW"  | jq -r '.address')
@@ -157,9 +186,14 @@ jobs:
 
               [[ -z "$NAME" ]] && continue
 
+              # Skip if already in imports file
+              if [[ -f "$IMPORTS_FILE" ]] && grep -qF "to = ${ADDR}" "$IMPORTS_FILE"; then
+                continue
+              fi
+
               AZURE_ID=$(find_in_azure "$TYPE" "$NAME" "$RG" "$AT" "$PID" 2>/dev/null) || true
               if [[ -n "$AZURE_ID" ]]; then
-                echo "  Found: $ADDR → $AZURE_ID"
+                echo "  🔄 $ADDR → $AZURE_ID"
                 cat >> "$IMPORTS_FILE" <<EOF
           import {
             to = ${ADDR}
@@ -167,24 +201,28 @@ jobs:
           }
 
           EOF
-                FOUND=$((FOUND + 1))
+                PASS_IMPORTS=$((PASS_IMPORTS + 1))
               fi
             done
 
-            echo ""
-            if [[ $FOUND -gt 0 ]]; then
-              echo "📋 Generated $FOUND import block(s) in $IMPORTS_FILE"
-            else
-              echo "✅ No existing resources to import — state is in sync"
+            TOTAL_IMPORTS=$((TOTAL_IMPORTS + PASS_IMPORTS))
+
+            if [[ $PASS_IMPORTS -eq 0 ]]; then
+              echo "No new imports — plan is final"
+              break
             fi
-          fi
 
-          rm -f _discovery.tfplan _discovery.json
+            echo "  Found $PASS_IMPORTS new import(s) (total: $TOTAL_IMPORTS) — re-planning..."
+          done
 
-      - name: Terraform Plan
-        run: |
-          terraform plan -var-file="${TFVARS_FILE}" -out=tfplan 2>&1 \
-            | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'
+          rm -f plan.json
+
+          # Show final plan summary
+          echo ""
+          echo "═══════════════════════════════════════"
+          echo " Final Plan ($TOTAL_IMPORTS import(s))"
+          echo "═══════════════════════════════════════"
+          terraform show tfplan 2>&1 | tf_quiet
 
       - name: Upload Plan Artifact
         if: inputs.mode == 'Plan & Apply'
@@ -226,5 +264,6 @@ jobs:
 
       - name: Terraform Apply
         run: |
+          set -o pipefail
           terraform apply tfplan 2>&1 \
             | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'
