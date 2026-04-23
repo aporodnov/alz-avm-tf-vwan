@@ -65,42 +65,36 @@ jobs:
 
           SUB_ID="${ARM_SUBSCRIPTION_ID}"
           TOTAL=0
+          SKIPPED=0
+          SKIP_LIST=""
           MAX_PASSES=5
 
           # ── Helpers ─────────────────────────────────────────────
+          #
+          # SAFETY: This workflow is READ-ONLY for Azure resources.
+          # The only mutations are against the Terraform state file
+          # in blob storage (terraform import / terraform state rm).
+          # No terraform apply is ever executed.
 
-          # Import a single resource into Terraform state.
-          # Fast path:  terraform import  (validates full config graph)
-          # Slow path:  import block + targeted apply  (evaluates only
-          #             the target resource & its deps — avoids for_each
-          #             errors in unrelated modules)
+          # Filter out noisy telemetry/data-source reads from terraform output
+          tf_quiet() {
+            grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)' || true
+          }
+
+          # Import a single resource into Terraform state (state-only, no apply).
           import_resource() {
             local addr="$1" id="$2"
             echo "→  ${addr}"
             echo "   ID: ${id}"
 
-            if terraform import -var-file="${TFVARS_FILE}" "${addr}" "${id}" 2>/dev/null; then
-              echo "   ✅ Imported"
+            if terraform import -var-file="${TFVARS_FILE}" "${addr}" "${id}" 2>&1 | tf_quiet; then
+              echo "   ✅ Imported into state"
               return 0
             fi
 
-            echo "   ⚠️  Direct import blocked — retrying with targeted apply..."
-            cat > _auto_import.tf <<IMPEOF
-          import {
-            to = ${addr}
-            id = "${id}"
-          }
-          IMPEOF
-
-            local rc=0
-            terraform apply -target="${addr}" -var-file="${TFVARS_FILE}" -auto-approve 2>&1 || rc=$?
-            rm -f _auto_import.tf
-
-            if [[ $rc -eq 0 ]]; then
-              echo "   ✅ Imported via targeted apply"
-              return 0
-            fi
-            echo "   ❌ Failed — may need manual intervention"
+            echo "   ⏭  Import blocked (likely for_each dependency) — skipping, deploy workflow will handle it"
+            SKIPPED=$((SKIPPED + 1))
+            SKIP_LIST="${SKIP_LIST}\n   - ${addr}"
             return 1
           }
 
@@ -200,12 +194,12 @@ jobs:
             echo " Pass ${PASS} / ${MAX_PASSES}"
             echo "═══════════════════════════════════════════"
 
-            rm -f tfplan plan.json _auto_import.tf
+            rm -f tfplan plan.json
 
             # Plan may fail (e.g. for_each errors) — that's OK if it
             # still wrote a plan file (partial plans are still useful).
             terraform plan -out=tfplan -refresh=false \
-              -var-file="${TFVARS_FILE}" 2>&1 | tail -30 || true
+              -var-file="${TFVARS_FILE}" 2>&1 | tf_quiet | tail -30 || true
 
             if [[ ! -f tfplan ]]; then
               echo "⚠️  Plan did not produce output — retrying next pass"
@@ -277,12 +271,19 @@ jobs:
           echo ""
           echo "Post-import — cleaning stale entries..."
           clean_stale_azapi
-          rm -f tfplan plan.json _auto_import.tf
+          rm -f tfplan plan.json
 
           echo ""
           echo "════════════════════════════════════════════"
           echo " Import complete — $TOTAL resource(s) adopted"
+          if [[ $SKIPPED -gt 0 ]]; then
+            echo ""
+            echo " ⏭  $SKIPPED resource(s) skipped (need deploy workflow):"
+            echo -e "$SKIP_LIST"
+          fi
           echo "════════════════════════════════════════════"
 
       - name: Final Plan (verify)
-        run: terraform plan -var-file="${TFVARS_FILE}"
+        run: |
+          terraform plan -var-file="${TFVARS_FILE}" 2>&1 \
+            | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'
