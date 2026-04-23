@@ -82,22 +82,32 @@ extract_creates() {
 IMPORTS_FILE="imports_auto.tf"
 rm -f "$IMPORTS_FILE"
 
-echo ""
-echo "═══════════════════════════════════════"
-echo " Planning..."
-echo "═══════════════════════════════════════"
+TOTAL_IMPORTS=0
+MAX_PASSES=3
 
-terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
+for PASS in $(seq 1 $MAX_PASSES); do
+  echo ""
+  echo "═══════════════════════════════════════"
+  if [[ "$PASS" -eq 1 ]]; then
+    echo " Planning..."
+  else
+    echo " Pass $PASS — re-planning after $TOTAL_IMPORTS import(s)..."
+  fi
+  echo "═══════════════════════════════════════"
 
-CREATES=$(extract_creates)
-COUNT=$(echo "$CREATES" | jq 'length')
+  terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
 
-if [[ "$COUNT" -eq 0 ]]; then
-  echo "  ✅ No resources to create — state is in sync"
-else
+  CREATES=$(extract_creates)
+  COUNT=$(echo "$CREATES" | jq 'length')
+
+  if [[ "$COUNT" -eq 0 ]]; then
+    echo "  ✅ No resources to create — state is in sync"
+    break
+  fi
+
   echo "  $COUNT resource(s) to create — checking Azure..."
 
-  IMPORT_COUNT=0
+  PASS_IMPORTS=0
 
   for i in $(seq 0 $((COUNT - 1))); do
     ROW=$(echo "$CREATES" | jq -c ".[$i]")
@@ -107,6 +117,11 @@ else
     RG=$(echo "$ROW"   | jq -r '.rg // empty')
     PID=$(echo "$ROW"  | jq -r '.pid // empty')
     AT=$(echo "$ROW"   | jq -r '.atype // empty')
+
+    # Skip if already in imports file from a previous pass
+    if [[ -f "$IMPORTS_FILE" ]] && grep -qF "to = ${ADDR}" "$IMPORTS_FILE"; then
+      continue
+    fi
 
     AZ_ID=$(resolve_azure_id "$TYPE" "$NAME" "$RG" "$PID" "$AT" 2>/dev/null) || continue
     exists_in_azure "$TYPE" "$AZ_ID" "$NAME" || continue
@@ -119,16 +134,22 @@ import {
   id = "${AZ_ID}"
 }
 EOF
-    IMPORT_COUNT=$((IMPORT_COUNT + 1))
+    PASS_IMPORTS=$((PASS_IMPORTS + 1))
   done
 
-  if [[ "$IMPORT_COUNT" -gt 0 ]]; then
-    echo ""
-    echo "═══════════════════════════════════════"
-    echo " Re-planning with $IMPORT_COUNT import(s)..."
-    echo "═══════════════════════════════════════"
-    terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
-  fi
+  TOTAL_IMPORTS=$((TOTAL_IMPORTS + PASS_IMPORTS))
+
+  # No new imports found — plan is final
+  [[ "$PASS_IMPORTS" -eq 0 ]] && break
+done
+
+# Produce final plan if imports were written (need one more plan to include all)
+if [[ "$TOTAL_IMPORTS" -gt 0 ]]; then
+  echo ""
+  echo "═══════════════════════════════════════"
+  echo " Final plan with $TOTAL_IMPORTS import(s)..."
+  echo "═══════════════════════════════════════"
+  terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
 fi
 
 # Destroy safety check
@@ -144,5 +165,5 @@ terraform show tfplan 2>&1 | tf_quiet | tail -5
 
 echo ""
 echo "═══════════════════════════════════════"
-echo " Done — ${IMPORT_COUNT:-0} import(s) queued in plan"
+echo " Done — $TOTAL_IMPORTS import(s) queued in plan"
 echo "═══════════════════════════════════════"
