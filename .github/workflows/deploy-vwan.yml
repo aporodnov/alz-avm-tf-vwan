@@ -113,11 +113,10 @@ jobs:
 
       - name: Restore Imports File
         run: |
-          # imports_auto.tf must be present for apply if the plan included imports
           if [[ -f imports_auto.tf ]]; then
-            echo "Restored imports_auto.tf ($(grep -c '^import' imports_auto.tf) import blocks)"
+            echo "$(grep -c '^import' imports_auto.tf) import block(s) to apply"
           else
-            echo "No imports file — clean plan"
+            echo "Clean plan — no imports"
           fi
 
       - name: Terraform Apply
