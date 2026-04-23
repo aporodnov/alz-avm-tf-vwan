@@ -1,4 +1,4 @@
-name: Import - Adopt Existing Azure Resources
+name: 1 - Import State
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         type: choice
         description: Target vWAN profile (selects tfvars file and subscription)
         required: true
-        default: Prod
+        default: Lab
         options:
           - Prod
           - Lab
