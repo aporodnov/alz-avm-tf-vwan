@@ -15,6 +15,7 @@ virtual_wan_type               = "Standard"
 allow_branch_to_branch_traffic = true
 
 enable_ddos_protection_plan = false
+enable_telemetry            = false
 dns_resource_group_name = "DNS-RG"
 virtual_hubs = {
 
@@ -25,8 +26,8 @@ virtual_hubs = {
       firewall                              = false
       firewall_policy                       = false
       bastion                               = true
-      virtual_network_gateway_express_route = false
-      virtual_network_gateway_vpn           = false
+      virtual_network_gateway_express_route = true
+      virtual_network_gateway_vpn           = true
       private_dns_zones                     = true
       private_dns_resolver                  = true
       sidecar_virtual_network               = true
@@ -37,6 +38,17 @@ virtual_hubs = {
       address_prefix                         = "10.58.128.0/21"
       hub_routing_preference                 = "ExpressRoute"
       virtual_router_auto_scale_min_capacity = 2
+    }
+
+    virtual_network_gateways = {
+      express_route = {
+        name        = "ergw-cc-cloud"
+        scale_units = 1
+      }
+      vpn = {
+        name       = "vpngw-cc-cloud"
+        scale_unit = 1
+      }
     }
     sidecar_virtual_network = {
       name          = "vnet-sidecar-cc-cloud"
@@ -78,25 +90,20 @@ virtual_hubs = {
     private_dns_zones = {
       auto_registration_zone_enabled = false
 
-      # Exclude the bugged AVM zone (tip1 instead of prod) and add the correct one below.
       private_link_excluded_zones = [
         "azure_power_bi_power_query",  # AVM bug: deploys privatelink.tip1.powerquery.microsoft.com instead of privatelink.prod.powerquery.microsoft.com
       ]
-
-      # Add the correct Power BI Power Query zone that the AVM module gets wrong.
       private_link_private_dns_zones_additional = {
         azure_power_bi_power_query_correct = {
           zone_name = "privatelink.prod.powerquery.microsoft.com"
         }
       }
-
       virtual_network_link_additional_virtual_networks = {
         # "spoke" = {
         #   virtual_network_resource_id = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>"
         # }
       }
     }
-
     private_dns_resolver = {
       name                             = "dnspr-cc-cloud"
       default_inbound_endpoint_enabled = false
