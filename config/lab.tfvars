@@ -86,9 +86,10 @@ virtual_hubs = {
     }
 
     private_dns_resolver = {
-      name                  = "dnspr-cc-cloud"
-      subnet_name           = "snet-dns-resolver-inbound"
-      subnet_address_prefix = "10.58.136.64/28"
+      name                             = "dnspr-cc-cloud"
+      default_inbound_endpoint_enabled = false
+      subnet_name                      = "snet-dns-resolver-inbound"
+      subnet_address_prefix            = "10.58.136.64/28"
       inbound_endpoints = {
         "default" = {
           name        = "ie-cc-cloud"
