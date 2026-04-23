@@ -17,7 +17,7 @@ that are hard to review and reproduce.
 |---|---|
 | **vWAN + Virtual Hub + Gateways** | [AVM pattern module `avm-ptn-alz-connectivity-virtual-wan`](https://registry.terraform.io/modules/Azure/avm-ptn-alz-connectivity-virtual-wan/azurerm/latest) — battle-tested, Microsoft-maintained |
 | **Router scale & routing intent** | Native module support — no separate bootstrap needed |
-| **Multi-profile support** | Separate `.tfvars` files per environment (hybrid / cloud) — switch profiles with a single dropdown |
+| **Multi-profile support** | Separate `.tfvars` files per environment (prod / lab) — switch profiles with a single dropdown |
 | **Safe deployments** | GitHub Actions workflow with `plan` preview before any real change |
 | **Identity** | Workload identity federation (OIDC) — no secrets stored in the repo |
 
@@ -25,8 +25,8 @@ that are hard to review and reproduce.
 
 ```
 config/
-  hybrid.tfvars             # Hybrid profile  (ExpressRoute + optional routing intent)
-  cloud.tfvars              # Cloud profile   (no on-prem connectivity)
+  prod.tfvars               # Prod profile   (no on-prem connectivity)
+  lab.tfvars                # Lab profile    (ExpressRoute + optional routing intent)
 main.tf                     # Orchestrator — RG + AVM module call
 variables.tf                # Input variables
 outputs.tf                  # Key outputs
@@ -45,15 +45,15 @@ Create a GitHub environment (`Prod` or `Lab`) with these **variables**:
 |---|---|
 | `AZURE_TENANT_ID` | Your Entra ID tenant |
 | `VWAN_SPN_CLIENT_ID` | App registration client ID (federated credential for OIDC) |
-| `HYBRID_AZURE_SUBSCRIPTION_ID` | Target subscription for Hybrid profile |
-| `CLOUD_AZURE_SUBSCRIPTION_ID` | Target subscription for Cloud profile |
+| `PROD_AZURE_SUBSCRIPTION_ID` | Target subscription for Prod profile |
+| `LAB_AZURE_SUBSCRIPTION_ID` | Target subscription for Lab profile |
 
 The service principal needs **Contributor** (or scoped Network Contributor + RG
 Contributor) on the target subscription.
 
 ### 2. Customise a variable file
 
-Edit `config/hybrid.tfvars` (or `config/cloud.tfvars`):
+Edit `config/prod.tfvars` (or `config/lab.tfvars`):
 
 - Set the vWAN name, hub name, address prefix, and location.
 - Uncomment the `express_route_circuit_connections` block and supply your circuit
@@ -64,15 +64,15 @@ Edit `config/hybrid.tfvars` (or `config/cloud.tfvars`):
 ### 3. Run the workflow
 
 1. Go to **Actions → Deploy - vWAN Network**
-2. Pick a **Profile** (`Hybrid` or `Cloud`) and a **Mode** (`Plan` or `Apply`)
+2. Pick a **Profile** (`Prod` or `Lab`) and a **Mode** (`Plan` or `Apply`)
 3. Review the Plan output, then re-run with `Apply` when ready
 
 ### Local execution
 
 ```bash
 terraform init
-terraform plan  -var-file="config/hybrid.tfvars"
-terraform apply -var-file="config/hybrid.tfvars"
+terraform plan  -var-file="config/prod.tfvars"
+terraform apply -var-file="config/prod.tfvars"
 ```
 
 ## Key Design Decisions
@@ -95,7 +95,7 @@ account details. For per-profile state isolation you can override the key at
 init time:
 
 ```bash
-terraform init -backend-config="key=hybrid.terraform.tfstate"
+terraform init -backend-config="key=prod.terraform.tfstate"
 ```
 
 ## Contributing

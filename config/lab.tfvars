@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# Hybrid profile — ExpressRoute gateway + optional routing intent
+# Lab profile — ExpressRoute gateway + optional routing intent
 # ─────────────────────────────────────────────────────────────
 
 networking_resource_group_name = "AVNM-RG"

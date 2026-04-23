@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# Cloud profile — cloud-only (no on-prem connectivity)
+# Prod profile — cloud-only (no on-prem connectivity)
 # ─────────────────────────────────────────────────────────────
 
 networking_resource_group_name = "AVNM-RG"

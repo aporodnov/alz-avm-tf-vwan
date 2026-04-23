@@ -14,7 +14,7 @@ terraform {
 
   # ── Remote state ──────────────────────────────────────────
   # All backend values are supplied at init time via
-  # -backend-config so each profile (Hybrid / Cloud) can
+  # -backend-config so each profile (Prod / Lab) can
   # target its own subscription, storage account, and state file.
   backend "azurerm" {
     use_oidc = true

@@ -7,18 +7,18 @@ on:
         type: choice
         description: Target vWAN profile (selects tfvars file and subscription)
         required: true
-        default: Hybrid
+        default: Prod
         options:
-          - Hybrid
-          - Cloud
+          - Prod
+          - Lab
 
 env:
-  TFVARS_FILE: ${{ inputs.profile == 'Hybrid' && 'config/hybrid.tfvars' || 'config/cloud.tfvars' }}
-  TF_BACKEND_RG: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_TF_STATE_RG || vars.CLOUD_TF_STATE_RG }}
-  TF_BACKEND_SA: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_TF_STATE_SA || vars.CLOUD_TF_STATE_SA }}
+  TFVARS_FILE: ${{ inputs.profile == 'Prod' && 'config/prod.tfvars' || 'config/lab.tfvars' }}
+  TF_BACKEND_RG: ${{ inputs.profile == 'Prod' && vars.PROD_TF_STATE_RG || vars.LAB_TF_STATE_RG }}
+  TF_BACKEND_SA: ${{ inputs.profile == 'Prod' && vars.PROD_TF_STATE_SA || vars.LAB_TF_STATE_SA }}
   TF_BACKEND_CONTAINER: tfstate
-  TF_BACKEND_KEY: ${{ inputs.profile == 'Hybrid' && 'vwan-hybrid.tfstate' || 'vwan-cloud.tfstate' }}
-  ARM_SUBSCRIPTION_ID: ${{ inputs.profile == 'Hybrid' && vars.HYBRID_AZURE_SUBSCRIPTION_ID || vars.CLOUD_AZURE_SUBSCRIPTION_ID }}
+  TF_BACKEND_KEY: ${{ inputs.profile == 'Prod' && 'vwan-prod.tfstate' || 'vwan-lab.tfstate' }}
+  ARM_SUBSCRIPTION_ID: ${{ inputs.profile == 'Prod' && vars.PROD_AZURE_SUBSCRIPTION_ID || vars.LAB_AZURE_SUBSCRIPTION_ID }}
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   ARM_CLIENT_ID: ${{ vars.VWAN_SPN_CLIENT_ID }}
   ARM_USE_OIDC: true
