@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# Lab profile — ExpressRoute gateway + optional routing intent
+# Lab profile — cloud-only (no on-prem connectivity)
 # ─────────────────────────────────────────────────────────────
 
 networking_resource_group_name = "AVNM-RG"
@@ -7,7 +7,7 @@ location            = "canadacentral"
 
 tags = {
   Environment  = "Prod"
-  SolutionName = "Hybrid Vwan"
+  SolutionName = "Cloud Vwan"
 }
 
 virtual_wan_name               = "vwan01"
@@ -16,10 +16,8 @@ allow_branch_to_branch_traffic = true
 
 enable_ddos_protection_plan = false
 dns_resource_group_name = "DNS-RG"
-
 virtual_hubs = {
 
-  # ── Canada Central hub ────────────────────────────────────
   "cc-hub" = {
     location = "canadacentral"
 
@@ -27,65 +25,43 @@ virtual_hubs = {
       firewall                              = false
       firewall_policy                       = false
       bastion                               = true
-      virtual_network_gateway_express_route = true
+      virtual_network_gateway_express_route = false
       virtual_network_gateway_vpn           = false
       private_dns_zones                     = true
       private_dns_resolver                  = true
       sidecar_virtual_network               = true
     }
 
-    # Hub properties
     hub = {
-      name                                   = "vHUB-CC-Hybrid-Fortinet"
+      name                                   = "vHUB-CC-Cloud"
       address_prefix                         = "10.58.128.0/21"
       hub_routing_preference                 = "ExpressRoute"
-      virtual_router_auto_scale_min_capacity = 3 # router scale units
+      virtual_router_auto_scale_min_capacity = 2
     }
+    sidecar_virtual_network = {
+      name          = "vnet-sidecar-cc-cloud"
+      address_space = ["10.58.136.0/24"]
 
-    # ExpressRoute gateway
-    virtual_network_gateways = {
-      express_route = {
-        name                          = "vHUB-CC-Hybrid-Fortinet-ERGW"
-        allow_non_virtual_wan_traffic = true
-        scale_units                   = 1
+      virtual_network_connection_settings = {
+        name = "vnet-conn-sidecar-cc-cloud"
+      }
+
+      subnets = {
+        "dns-resolver-outbound" = {
+          name             = "snet-dns-resolver-outbound"
+          address_prefixes = ["10.58.136.80/28"]
+          delegations = [{
+            name = "Microsoft.Network.dnsResolvers"
+            service_delegation = {
+              name = "Microsoft.Network/dnsResolvers"
+            }
+          }]
+        }
       }
     }
 
-    # ── ExpressRoute circuit connections ────────────────────
-    # Uncomment and supply your circuit peering ID + auth key.
-    #
-    # express_route_circuit_connections = {
-    #   "er-connection-01" = {
-    #     name                             = "er-connection-toVHUBFortinet"
-    #     express_route_circuit_peering_id = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/expressRouteCircuits/<circuit>/peerings/AzurePrivatePeering"
-    #     authorization_key                = ""  # inject via TF_VAR_ or a Key Vault data source
-    #   }
-    # }
-
-    # ── Routing intent (Azure Firewall as next hop) ─────────
-    # To enable: set firewall + firewall_policy = true above,
-    # then uncomment the block below.
-    #
-    # routing_intents = {
-    #   "default" = {
-    #     name = "RoutingIntent"
-    #     routing_policies = [
-    #       {
-    #         name                  = "PrivateTrafficPolicy"
-    #         destinations          = ["PrivateTraffic"]
-    #         next_hop_firewall_key = "cc-hub"
-    #       },
-    #       {
-    #         name                  = "InternetTrafficPolicy"
-    #         destinations          = ["Internet"]
-    #         next_hop_firewall_key = "cc-hub"
-    #       }
-    #     ]
-    #   }
-    # }
-
     bastion = {
-      name                  = "bas-cc-hybrid"
+      name                  = "bas-cc-cloud"
       subnet_address_prefix = "10.58.136.0/26"
       sku                   = "Standard"
       copy_paste_enabled    = true
@@ -95,7 +71,7 @@ virtual_hubs = {
       scale_units           = 2
 
       bastion_public_ip = {
-        name = "pip-bas-cc-hybrid"
+        name = "pip-bas-cc-cloud"
       }
     }
 
@@ -110,12 +86,12 @@ virtual_hubs = {
     }
 
     private_dns_resolver = {
-      name                  = "dnspr-cc-hybrid"
+      name                  = "dnspr-cc-cloud"
       subnet_name           = "snet-dns-resolver-inbound"
       subnet_address_prefix = "10.58.136.64/28"
       inbound_endpoints = {
         "default" = {
-          name        = "ie-cc-hybrid"
+          name        = "ie-cc-cloud"
           subnet_name = "snet-dns-resolver-inbound"
         }
       }
@@ -124,7 +100,7 @@ virtual_hubs = {
           subnet_name = "snet-dns-resolver-outbound"
           forwarding_ruleset = {
             "default" = {
-              name                                     = "frs-cc-hybrid"
+              name                                     = "frs-cc-cloud"
               link_with_outbound_endpoint_virtual_network = true
               additional_virtual_network_links = {}
               rules = {
@@ -137,28 +113,6 @@ virtual_hubs = {
               }
             }
           }
-        }
-      }
-    }
-
-    sidecar_virtual_network = {
-      name          = "vnet-sidecar-cc-hybrid"
-      address_space = ["10.58.136.0/24"]
-
-      virtual_network_connection_settings = {
-        name = "vnet-conn-sidecar-cc-hybrid"
-      }
-
-      subnets = {
-        "dns-resolver-outbound" = {
-          name             = "snet-dns-resolver-outbound"
-          address_prefixes = ["10.58.136.80/28"]
-          delegations = [{
-            name = "Microsoft.Network.dnsResolvers"
-            service_delegation = {
-              name = "Microsoft.Network/dnsResolvers"
-            }
-          }]
         }
       }
     }

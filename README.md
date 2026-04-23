@@ -25,8 +25,8 @@ that are hard to review and reproduce.
 
 ```
 config/
-  prod.tfvars               # Prod profile   (no on-prem connectivity)
-  lab.tfvars                # Lab profile    (ExpressRoute + optional routing intent)
+  prod.tfvars               # Prod profile   (ExpressRoute + optional routing intent)
+  lab.tfvars                # Lab profile    (no on-prem connectivity)
 main.tf                     # Orchestrator — RG + AVM module call
 variables.tf                # Input variables
 outputs.tf                  # Key outputs
