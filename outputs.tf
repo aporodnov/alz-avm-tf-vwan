@@ -28,7 +28,12 @@ output "firewall_resource_ids" {
   description = "Resource IDs of the Azure Firewalls."
 }
 
-output "resource_group_name" {
-  value       = azurerm_resource_group.vwan.name
-  description = "Name of the resource group."
+output "networking_resource_group_name" {
+  value       = azurerm_resource_group.networking.name
+  description = "Name of the networking resource group."
+}
+
+output "dns_resource_group_name" {
+  value       = try(azurerm_resource_group.dns[0].name, null)
+  description = "Name of the DNS resource group."
 }

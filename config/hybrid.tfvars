@@ -2,7 +2,7 @@
 # Hybrid profile — ExpressRoute gateway + optional routing intent
 # ─────────────────────────────────────────────────────────────
 
-resource_group_name = "AVNM-RG"
+networking_resource_group_name = "AVNM-RG"
 location            = "canadacentral"
 
 tags = {
@@ -15,6 +15,7 @@ virtual_wan_type               = "Standard"
 allow_branch_to_branch_traffic = true
 
 enable_ddos_protection_plan = false
+dns_resource_group_name = "DNS-RG"
 
 virtual_hubs = {
 
@@ -28,7 +29,7 @@ virtual_hubs = {
       bastion                               = true
       virtual_network_gateway_express_route = true
       virtual_network_gateway_vpn           = false
-      private_dns_zones                     = false
+      private_dns_zones                     = true
       private_dns_resolver                  = true
       sidecar_virtual_network               = true
     }
@@ -98,11 +99,20 @@ virtual_hubs = {
       }
     }
 
+    private_dns_zones = {
+      auto_registration_zone_enabled = false
+      private_link_excluded_zones    = []
+      virtual_network_link_additional_virtual_networks = {
+        # "spoke" = {
+        #   virtual_network_resource_id = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>"
+        # }
+      }
+    }
+
     private_dns_resolver = {
-      name                            = "dnspr-cc-hybrid"
-      subnet_name                     = "snet-dns-resolver-inbound"
-      subnet_address_prefix           = "10.58.136.64/28"
-      default_inbound_endpoint_enabled = false
+      name                  = "dnspr-cc-hybrid"
+      subnet_name           = "snet-dns-resolver-inbound"
+      subnet_address_prefix = "10.58.136.64/28"
       inbound_endpoints = {
         "default" = {
           name        = "ie-cc-hybrid"
@@ -114,7 +124,9 @@ virtual_hubs = {
           subnet_name = "snet-dns-resolver-outbound"
           forwarding_ruleset = {
             "default" = {
-              name = "frs-cc-hybrid"
+              name                                     = "frs-cc-hybrid"
+              link_with_outbound_endpoint_virtual_network = true
+              additional_virtual_network_links = {}
               rules = {
                 "onprem-contoso" = {
                   domain_name              = "contoso.local."

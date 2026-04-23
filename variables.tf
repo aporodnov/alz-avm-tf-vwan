@@ -1,6 +1,6 @@
-variable "resource_group_name" {
+variable "networking_resource_group_name" {
   type        = string
-  description = "Name of the resource group for all vWAN resources."
+  description = "Name of the resource group for networking resources (vWAN, hubs, sidecar VNet, Bastion)."
 }
 
 variable "location" {
@@ -40,6 +40,14 @@ variable "virtual_hubs" {
   type        = any
   default     = {}
   description = "Map of virtual hubs to create. See config/*.tfvars for examples."
+}
+
+# ── Private DNS Zones ─────────────────────────────────────────
+
+variable "dns_resource_group_name" {
+  type        = string
+  default     = null
+  description = "Name of a dedicated resource group for DNS resources (Private DNS Zones, DNS Resolver, forwarding rulesets). Created automatically when set."
 }
 
 # ── DDoS Protection ───────────────────────────────────────────
