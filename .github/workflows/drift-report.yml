@@ -29,9 +29,9 @@ permissions:
 
 jobs:
   report:
-    name: Drift Report
+    name: Drift Report (${{ inputs.profile }})
     runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/main' && 'Prod' || 'Lab' }}
+    environment: ${{ inputs.profile }}
 
     steps:
       - name: Checkout
@@ -115,11 +115,24 @@ jobs:
           fi
           terraform show -json _report.tfplan > _report.json 2>/dev/null
 
-          # Categorize planned changes
-          CREATES=$(jq -c '[.resource_changes[] | select(.change.actions == ["create"]) | {address: .address, type: .type, name: (.change.after.name // null), rg: (.change.after.resource_group_name // null), azapi_type: (if .type == "azapi_resource" then (.change.after.type // "" | split("@")[0]) else null end), parent_id: (if .type == "azapi_resource" then .change.after.parent_id else null end)}]' _report.json)
-          UPDATES=$(jq '[.resource_changes[] | select(.change.actions == ["update"] or .change.actions == ["delete","create"]) | .address]' _report.json)
-          DELETES=$(jq '[.resource_changes[] | select(.change.actions == ["delete"]) | .address]' _report.json)
-          NOOPS=$(jq '[.resource_changes[] | select(.change.actions == ["no-op"] or .change.actions == ["read"]) | .address] | length' _report.json)
+          # Categorize planned changes (only real Azure resources — skip telemetry, random_uuid, etc.)
+          CREATES=$(jq -c '[.resource_changes[]
+            | select(.change.actions == ["create"])
+            | select(.type | startswith("azurerm_") or . == "azapi_resource")
+            | select(.change.after.name != null and .change.after.name != "")
+            | {address: .address, type: .type, name: .change.after.name, rg: (.change.after.resource_group_name // null), azapi_type: (if .type == "azapi_resource" then (.change.after.type // "" | split("@")[0]) else null end), parent_id: (if .type == "azapi_resource" then .change.after.parent_id else null end)}]' _report.json)
+          UPDATES=$(jq '[.resource_changes[]
+            | select(.change.actions == ["update"] or .change.actions == ["delete","create"])
+            | select(.type | startswith("azurerm_") or . == "azapi_resource")
+            | .address]' _report.json)
+          DELETES=$(jq '[.resource_changes[]
+            | select(.change.actions == ["delete"])
+            | select(.type | startswith("azurerm_") or . == "azapi_resource")
+            | .address]' _report.json)
+          NOOPS=$(jq '[.resource_changes[]
+            | select(.change.actions == ["no-op"] or .change.actions == ["read"])
+            | select(.type | startswith("azurerm_") or . == "azapi_resource")
+            | .address] | length' _report.json)
 
           COUNT=$(echo "$CREATES" | jq 'length')
           IMPORT_CANDIDATES=0
@@ -132,8 +145,9 @@ jobs:
           echo ""
 
           if [[ "$COUNT" -gt 0 ]]; then
-            echo "📋 Resources Terraform wants to CREATE ($COUNT):"
+            echo "📋 Azure resources Terraform wants to CREATE ($COUNT):"
             echo ""
+
             for i in $(seq 0 $((COUNT - 1))); do
               ROW=$(echo "$CREATES" | jq -c ".[$i]")
               ADDR=$(echo "$ROW" | jq -r '.address')
