@@ -17,7 +17,8 @@ terraform {
   # -backend-config so each profile (Prod / Lab) can
   # target its own subscription, storage account, and state file.
   backend "azurerm" {
-    use_oidc = true
+    use_oidc         = true
+    use_azuread_auth = true
   }
 }
 
