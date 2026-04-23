@@ -59,8 +59,132 @@ jobs:
             -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
             -backend-config="key=${TF_BACKEND_KEY}"
 
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.VWAN_SPN_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Discover Existing Resources
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          SUB_ID="${ARM_SUBSCRIPTION_ID}"
+          IMPORTS_FILE="imports_generated.tf"
+          rm -f "$IMPORTS_FILE"
+
+          # Filter noisy telemetry lines from terraform output
+          tf_quiet() {
+            grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)' || true
+          }
+
+          # Look up a resource in Azure; prints its resource ID on success.
+          find_in_azure() {
+            local tf_type="$1" name="$2" rg="$3" azapi_type="${4:-}" parent_id="${5:-}"
+
+            if [[ "$tf_type" == "azurerm_resource_group" ]]; then
+              local id="/subscriptions/${SUB_ID}/resourceGroups/${name}"
+              az group show --name "$name" --subscription "$SUB_ID" &>/dev/null && echo "$id" && return 0
+              return 1
+            fi
+
+            if [[ "$tf_type" == "azapi_resource" && -n "$parent_id" && -n "$azapi_type" ]]; then
+              local segs id
+              segs=$(echo "$azapi_type" | tr '/' '\n' | wc -l)
+              if (( segs > 2 )); then
+                id="${parent_id}/$(echo "$azapi_type" | rev | cut -d/ -f1 | rev)/${name}"
+              else
+                id="${parent_id}/providers/${azapi_type}/${name}"
+              fi
+              az resource show --ids "$id" --subscription "$SUB_ID" &>/dev/null && echo "$id" && return 0
+              return 1
+            fi
+
+            local found=""
+            if [[ -n "$rg" ]]; then
+              found=$(az resource list --name "$name" -g "$rg" --subscription "$SUB_ID" \
+                      --query "[0].id" -o tsv 2>/dev/null || true)
+            fi
+            if [[ -z "$found" ]]; then
+              found=$(az resource list --name "$name" --subscription "$SUB_ID" \
+                      --query "[0].id" -o tsv 2>/dev/null || true)
+            fi
+            [[ -n "$found" ]] && echo "$found" && return 0
+            return 1
+          }
+
+          echo "Discovering resources that exist in Azure but not in state..."
+
+          # Run a throwaway plan to find what Terraform wants to create
+          terraform plan -out=_discovery.tfplan -refresh=false \
+            -var-file="${TFVARS_FILE}" 2>&1 | tf_quiet | tail -5 || true
+
+          if [[ ! -f _discovery.tfplan ]]; then
+            echo "Plan did not produce output — skipping discovery"
+          elif terraform show -json _discovery.tfplan > _discovery.json 2>/dev/null; then
+
+            CREATES=$(jq -c '[
+              .resource_changes[]
+              | select(.change.actions == ["create"])
+              | select(.type | startswith("azurerm_") or . == "azapi_resource")
+              | {
+                  address:    .address,
+                  type:       .type,
+                  name:       (.change.after.name // null),
+                  rg:         (.change.after.resource_group_name // null),
+                  azapi_type: (if .type == "azapi_resource"
+                               then (.change.after.type // "" | split("@")[0])
+                               else null end),
+                  parent_id:  (if .type == "azapi_resource"
+                               then .change.after.parent_id
+                               else null end)
+                }
+            ]' _discovery.json)
+
+            COUNT=$(echo "$CREATES" | jq 'length')
+            FOUND=0
+
+            for i in $(seq 0 $((COUNT - 1))); do
+              ROW=$(echo "$CREATES" | jq -c ".[$i]")
+              ADDR=$(echo "$ROW"  | jq -r '.address')
+              TYPE=$(echo "$ROW"  | jq -r '.type')
+              NAME=$(echo "$ROW"  | jq -r '.name // empty')
+              RG=$(echo "$ROW"    | jq -r '.rg // empty')
+              AT=$(echo "$ROW"    | jq -r '.azapi_type // empty')
+              PID=$(echo "$ROW"   | jq -r '.parent_id // empty')
+
+              [[ -z "$NAME" ]] && continue
+
+              AZURE_ID=$(find_in_azure "$TYPE" "$NAME" "$RG" "$AT" "$PID" 2>/dev/null) || true
+              if [[ -n "$AZURE_ID" ]]; then
+                echo "  Found: $ADDR → $AZURE_ID"
+                cat >> "$IMPORTS_FILE" <<EOF
+          import {
+            to = ${ADDR}
+            id = "${AZURE_ID}"
+          }
+
+          EOF
+                FOUND=$((FOUND + 1))
+              fi
+            done
+
+            echo ""
+            if [[ $FOUND -gt 0 ]]; then
+              echo "📋 Generated $FOUND import block(s) in $IMPORTS_FILE"
+            else
+              echo "✅ No existing resources to import — state is in sync"
+            fi
+          fi
+
+          rm -f _discovery.tfplan _discovery.json
+
       - name: Terraform Plan
-        run: terraform plan -var-file="${TFVARS_FILE}" -out=tfplan
+        run: |
+          terraform plan -var-file="${TFVARS_FILE}" -out=tfplan 2>&1 \
+            | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'
 
       - name: Upload Plan Artifact
         if: inputs.mode == 'Plan & Apply'
@@ -101,4 +225,6 @@ jobs:
           name: tfplan-${{ inputs.profile }}
 
       - name: Terraform Apply
-        run: terraform apply tfplan
+        run: |
+          terraform apply tfplan 2>&1 \
+            | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'

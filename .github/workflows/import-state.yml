@@ -1,4 +1,4 @@
-name: 1 - Import State
+name: 1 - State Drift Report
 
 on:
   workflow_dispatch:
@@ -28,8 +28,8 @@ permissions:
   contents: read
 
 jobs:
-  import:
-    name: Detect & Import
+  report:
+    name: Drift Report
     runs-on: ubuntu-latest
     environment: ${{ github.ref == 'refs/heads/main' && 'Prod' || 'Lab' }}
 
@@ -41,7 +41,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~> 1.9"
-          terraform_wrapper: false   # required — wrapper breaks JSON parsing
+          terraform_wrapper: false
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -58,58 +58,29 @@ jobs:
             -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
             -backend-config="key=${TF_BACKEND_KEY}"
 
-      - name: Detect & Import Existing Resources
+      - name: Generate Drift Report
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
 
+          # ─────────────────────────────────────────────────────
+          # READ-ONLY: This workflow never modifies Azure or state.
+          # It only reports what the deploy workflow would do.
+          # ─────────────────────────────────────────────────────
+
           SUB_ID="${ARM_SUBSCRIPTION_ID}"
-          TOTAL=0
-          SKIPPED=0
-          SKIP_LIST=""
-          MAX_PASSES=5
 
-          # ── Helpers ─────────────────────────────────────────────
-          #
-          # SAFETY: This workflow is READ-ONLY for Azure resources.
-          # The only mutations are against the Terraform state file
-          # in blob storage (terraform import / terraform state rm).
-          # No terraform apply is ever executed.
-
-          # Filter out noisy telemetry/data-source reads from terraform output
           tf_quiet() {
             grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)' || true
           }
 
-          # Import a single resource into Terraform state (state-only, no apply).
-          import_resource() {
-            local addr="$1" id="$2"
-            echo "→  ${addr}"
-            echo "   ID: ${id}"
-
-            if terraform import -var-file="${TFVARS_FILE}" "${addr}" "${id}" 2>&1 | tf_quiet; then
-              echo "   ✅ Imported into state"
-              return 0
-            fi
-
-            echo "   ⏭  Import blocked (likely for_each dependency) — skipping, deploy workflow will handle it"
-            SKIPPED=$((SKIPPED + 1))
-            SKIP_LIST="${SKIP_LIST}\n   - ${addr}"
-            return 1
-          }
-
-          # Look up a resource in Azure; prints its resource ID on success.
           find_in_azure() {
             local tf_type="$1" name="$2" rg="$3" azapi_type="${4:-}" parent_id="${5:-}"
 
-            # Resource groups
             if [[ "$tf_type" == "azurerm_resource_group" ]]; then
-              local id="/subscriptions/${SUB_ID}/resourceGroups/${name}"
-              az group show --name "$name" --subscription "$SUB_ID" &>/dev/null && echo "$id" && return 0
+              az group show --name "$name" --subscription "$SUB_ID" &>/dev/null && return 0
               return 1
             fi
-
-            # azapi_resource — build ID from parent + type + name
             if [[ "$tf_type" == "azapi_resource" && -n "$parent_id" && -n "$azapi_type" ]]; then
               local segs id
               segs=$(echo "$azapi_type" | tr '/' '\n' | wc -l)
@@ -118,11 +89,9 @@ jobs:
               else
                 id="${parent_id}/providers/${azapi_type}/${name}"
               fi
-              az resource show --ids "$id" --subscription "$SUB_ID" &>/dev/null && echo "$id" && return 0
+              az resource show --ids "$id" --subscription "$SUB_ID" &>/dev/null && return 0
               return 1
             fi
-
-            # azurerm_* — search Azure by name (scoped to RG when known)
             local found=""
             if [[ -n "$rg" ]]; then
               found=$(az resource list --name "$name" -g "$rg" --subscription "$SUB_ID" \
@@ -132,158 +101,91 @@ jobs:
               found=$(az resource list --name "$name" --subscription "$SUB_ID" \
                       --query "[0].id" -o tsv 2>/dev/null || true)
             fi
-            [[ -n "$found" ]] && echo "$found" && return 0
+            [[ -n "$found" ]] && return 0
             return 1
           }
 
-          # Remove azapi state entries whose Azure resource was deleted
-          clean_stale_azapi() {
-            local entries removed=0
-            entries=$(terraform state list 2>/dev/null | grep 'azapi_resource\.' || true)
-            [[ -z "$entries" ]] && return
-            while IFS= read -r addr; do
-              local rid
-              rid=$(terraform state show "$addr" 2>/dev/null \
-                    | grep '^\s*id\s*=' | head -1 \
-                    | sed 's/.*"\(.*\)"/\1/' || true)
-              [[ -z "$rid" ]] && continue
-              if ! az resource show --ids "$rid" --subscription "$SUB_ID" &>/dev/null; then
-                echo "  🗑 Removing stale: $addr"
-                terraform state rm "$addr" 2>/dev/null || true
-                removed=$((removed + 1))
-              fi
-            done <<< "$entries"
-            echo "  Cleaned $removed stale entry/entries."
-          }
+          echo "Running plan..."
+          terraform plan -out=_report.tfplan \
+            -var-file="${TFVARS_FILE}" 2>&1 | tf_quiet | tail -5 || true
 
-          # ── Phase 0: Clean stale state entries ──────────────────
-          echo "Phase 0 — Cleaning stale state entries..."
-          clean_stale_azapi
+          if [[ ! -f _report.tfplan ]]; then
+            echo "❌ Plan failed — cannot generate report"
+            exit 1
+          fi
+          terraform show -json _report.tfplan > _report.json 2>/dev/null
 
-          # ── Phase 1: Bootstrap resource groups ──────────────────
-          # RG names are extracted from the tfvars file and imported
-          # first so the main plan has a better chance of succeeding.
+          # Categorize planned changes
+          CREATES=$(jq -c '[.resource_changes[] | select(.change.actions == ["create"]) | {address: .address, type: .type, name: (.change.after.name // null), rg: (.change.after.resource_group_name // null), azapi_type: (if .type == "azapi_resource" then (.change.after.type // "" | split("@")[0]) else null end), parent_id: (if .type == "azapi_resource" then .change.after.parent_id else null end)}]' _report.json)
+          UPDATES=$(jq '[.resource_changes[] | select(.change.actions == ["update"] or .change.actions == ["delete","create"]) | .address]' _report.json)
+          DELETES=$(jq '[.resource_changes[] | select(.change.actions == ["delete"]) | .address]' _report.json)
+          NOOPS=$(jq '[.resource_changes[] | select(.change.actions == ["no-op"] or .change.actions == ["read"]) | .address] | length' _report.json)
+
+          COUNT=$(echo "$CREATES" | jq 'length')
+          IMPORT_CANDIDATES=0
+          NEW_RESOURCES=0
+
           echo ""
-          echo "Phase 1 — Bootstrapping resource groups..."
-          declare -A RG_MAP=(
-            [networking_resource_group_name]="azurerm_resource_group.networking"
-            [dns_resource_group_name]="azurerm_resource_group.dns[0]"
-          )
-          for var_name in "${!RG_MAP[@]}"; do
-            rg_name=$(awk -F'"' "/${var_name}/"'{print $2}' "${TFVARS_FILE}" 2>/dev/null || true)
-            [[ -z "$rg_name" ]] && continue
-            addr="${RG_MAP[$var_name]}"
+          echo "╔══════════════════════════════════════════════════╗"
+          echo "║       State Drift Report — ${{ inputs.profile }}              ║"
+          echo "╠══════════════════════════════════════════════════╣"
+          echo ""
 
-            if terraform state show "$addr" &>/dev/null 2>&1; then
-              echo "  ✓ $addr already in state"
-              continue
-            fi
-
-            rg_id="/subscriptions/${SUB_ID}/resourceGroups/${rg_name}"
-            if az group show --name "$rg_name" --subscription "$SUB_ID" &>/dev/null; then
-              import_resource "$addr" "$rg_id" && TOTAL=$((TOTAL + 1))
-            else
-              echo "  ✓ $rg_name not in Azure — will be created"
-            fi
-          done
-
-          # ── Phase 2: Multi-pass plan-based discovery & import ───
-          for PASS in $(seq 1 $MAX_PASSES); do
+          if [[ "$COUNT" -gt 0 ]]; then
+            echo "📋 Resources Terraform wants to CREATE ($COUNT):"
             echo ""
-            echo "═══════════════════════════════════════════"
-            echo " Pass ${PASS} / ${MAX_PASSES}"
-            echo "═══════════════════════════════════════════"
-
-            rm -f tfplan plan.json
-
-            # Plan may fail (e.g. for_each errors) — that's OK if it
-            # still wrote a plan file (partial plans are still useful).
-            terraform plan -out=tfplan -refresh=false \
-              -var-file="${TFVARS_FILE}" 2>&1 | tf_quiet | tail -30 || true
-
-            if [[ ! -f tfplan ]]; then
-              echo "⚠️  Plan did not produce output — retrying next pass"
-              continue
-            fi
-            if ! terraform show -json tfplan > plan.json 2>/dev/null; then
-              echo "⚠️  Cannot parse plan — retrying next pass"
-              continue
-            fi
-
-            # Extract resources Terraform wants to create
-            CREATES=$(jq -c '[
-              .resource_changes[]
-              | select(.change.actions == ["create"])
-              | select(.type | startswith("azurerm_") or . == "azapi_resource")
-              | {
-                  address:    .address,
-                  type:       .type,
-                  name:       (.change.after.name // null),
-                  rg:         (.change.after.resource_group_name // null),
-                  azapi_type: (if .type == "azapi_resource"
-                               then (.change.after.type // "" | split("@")[0])
-                               else null end),
-                  parent_id:  (if .type == "azapi_resource"
-                               then .change.after.parent_id
-                               else null end)
-                }
-            ]' plan.json)
-
-            COUNT=$(echo "$CREATES" | jq 'length')
-            if [[ "$COUNT" -eq 0 ]]; then
-              echo "✅ State is fully reconciled — nothing to create."
-              break
-            fi
-            echo "Found $COUNT resource(s) planned for creation."
-
-            PASS_IMPORTED=0
             for i in $(seq 0 $((COUNT - 1))); do
               ROW=$(echo "$CREATES" | jq -c ".[$i]")
-              ADDR=$(echo "$ROW"  | jq -r '.address')
-              TYPE=$(echo "$ROW"  | jq -r '.type')
-              NAME=$(echo "$ROW"  | jq -r '.name // empty')
-              RG=$(echo "$ROW"    | jq -r '.rg // empty')
-              AT=$(echo "$ROW"    | jq -r '.azapi_type // empty')
-              PID=$(echo "$ROW"   | jq -r '.parent_id // empty')
+              ADDR=$(echo "$ROW" | jq -r '.address')
+              TYPE=$(echo "$ROW" | jq -r '.type')
+              NAME=$(echo "$ROW" | jq -r '.name // empty')
+              RG=$(echo "$ROW"   | jq -r '.rg // empty')
+              AT=$(echo "$ROW"   | jq -r '.azapi_type // empty')
+              PID=$(echo "$ROW"  | jq -r '.parent_id // empty')
 
-              [[ -z "$NAME" ]] && echo "⏭  $ADDR — name unknown, deferring" && continue
-
-              AZURE_ID=$(find_in_azure "$TYPE" "$NAME" "$RG" "$AT" "$PID" 2>/dev/null) || true
-              if [[ -n "$AZURE_ID" ]]; then
-                import_resource "$ADDR" "$AZURE_ID" && PASS_IMPORTED=$((PASS_IMPORTED + 1))
+              if [[ -n "$NAME" ]] && find_in_azure "$TYPE" "$NAME" "$RG" "$AT" "$PID" 2>/dev/null; then
+                echo "  🔄 $ADDR ($NAME) — EXISTS in Azure, will be auto-imported"
+                IMPORT_CANDIDATES=$((IMPORT_CANDIDATES + 1))
               else
-                echo "✓  $ADDR ($NAME) — not in Azure, will be created"
+                echo "  🆕 $ADDR ($NAME) — new, will be created"
+                NEW_RESOURCES=$((NEW_RESOURCES + 1))
               fi
             done
-
-            TOTAL=$((TOTAL + PASS_IMPORTED))
             echo ""
-            echo "Pass $PASS: imported $PASS_IMPORTED | Total: $TOTAL"
-
-            if [[ $PASS_IMPORTED -eq 0 ]]; then
-              echo "No new imports — remaining resources are genuinely new."
-              break
-            fi
-            echo "Re-planning to resolve dependencies..."
-          done
-
-          # ── Cleanup ─────────────────────────────────────────────
-          echo ""
-          echo "Post-import — cleaning stale entries..."
-          clean_stale_azapi
-          rm -f tfplan plan.json
-
-          echo ""
-          echo "════════════════════════════════════════════"
-          echo " Import complete — $TOTAL resource(s) adopted"
-          if [[ $SKIPPED -gt 0 ]]; then
-            echo ""
-            echo " ⏭  $SKIPPED resource(s) skipped (need deploy workflow):"
-            echo -e "$SKIP_LIST"
           fi
-          echo "════════════════════════════════════════════"
 
-      - name: Final Plan (verify)
-        run: |
-          terraform plan -var-file="${TFVARS_FILE}" 2>&1 \
-            | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'
+          UPDATE_COUNT=$(echo "$UPDATES" | jq 'length')
+          if [[ "$UPDATE_COUNT" -gt 0 ]]; then
+            echo "✏️  Resources to UPDATE ($UPDATE_COUNT):"
+            echo "$UPDATES" | jq -r '.[] | "  • \(.)"'
+            echo ""
+          fi
+
+          DELETE_COUNT=$(echo "$DELETES" | jq 'length')
+          if [[ "$DELETE_COUNT" -gt 0 ]]; then
+            echo "⚠️  Resources to DELETE ($DELETE_COUNT):"
+            echo "$DELETES" | jq -r '.[] | "  • \(.)"'
+            echo ""
+          fi
+
+          echo "╠══════════════════════════════════════════════════╣"
+          echo "║  Summary                                         ║"
+          echo "╠══════════════════════════════════════════════════╣"
+          echo "  In sync:            $NOOPS"
+          echo "  Auto-import:        $IMPORT_CANDIDATES"
+          echo "  New (will create):  $NEW_RESOURCES"
+          echo "  Update:             $UPDATE_COUNT"
+          echo "  Delete:             $DELETE_COUNT"
+          echo "╚══════════════════════════════════════════════════╝"
+          echo ""
+
+          if [[ $IMPORT_CANDIDATES -gt 0 ]]; then
+            echo "ℹ️  The deploy workflow will auto-import existing resources."
+            echo "   Run '2 - Deploy vWAN Network' with Plan mode first to review."
+          fi
+
+          if [[ $DELETE_COUNT -gt 0 ]]; then
+            echo "⚠️  $DELETE_COUNT resource(s) will be DELETED — review carefully!"
+          fi
+
+          rm -f _report.tfplan _report.json
