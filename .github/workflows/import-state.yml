@@ -58,291 +58,231 @@ jobs:
             -backend-config="container_name=${TF_BACKEND_CONTAINER}" \
             -backend-config="key=${TF_BACKEND_KEY}"
 
-      - name: Remove Stale azapi Resources from State
-        run: |
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          # The azapi provider crashes with "Missing Resource Identity
-          # After Read" when refreshing state for resources that were
-          # deleted outside of Terraform (e.g. from the Azure portal).
-          # This step detects those stale entries and removes them from
-          # state so subsequent plan/import runs cleanly.
-
-          SUB_ID="${ARM_SUBSCRIPTION_ID}"
-          REMOVED=0
-
-          echo "Scanning state for stale azapi resources..."
-          AZAPI_ENTRIES=$(terraform state list 2>/dev/null | grep 'azapi_resource\.' || true)
-
-          if [[ -z "$AZAPI_ENTRIES" ]]; then
-            echo "No azapi resources in state — nothing to clean."
-            exit 0
-          fi
-
-          while IFS= read -r ADDR; do
-            # Extract the Azure resource ID from state
-            RESOURCE_ID=$(terraform state show "$ADDR" 2>/dev/null \
-              | grep '^\s*id\s*=' | head -1 \
-              | sed 's/.*"\(.*\)"/\1/' || true)
-
-            if [[ -z "$RESOURCE_ID" ]]; then
-              echo "⏭  $ADDR — could not read ID from state, skipping"
-              continue
-            fi
-
-            # Check if the resource still exists in Azure
-            if az resource show --ids "$RESOURCE_ID" --subscription "$SUB_ID" &>/dev/null; then
-              echo "✓  $ADDR — exists in Azure"
-            else
-              echo "🗑  $ADDR — deleted from Azure, removing from state"
-              terraform state rm "$ADDR" 2>/dev/null || true
-              REMOVED=$((REMOVED + 1))
-            fi
-          done <<< "$AZAPI_ENTRIES"
-
-          echo ""
-          echo "Cleanup complete: removed $REMOVED stale resource(s) from state."
-
       - name: Detect & Import Existing Resources
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
 
           SUB_ID="${ARM_SUBSCRIPTION_ID}"
-          TOTAL_IMPORTED=0
-          MAX_PASSES=3
+          TOTAL=0
+          MAX_PASSES=5
 
-          # ── Azure resource-type lookup table ────────────────────
-          declare -A AZ_TYPES=(
-            [azurerm_resource_group]="__rg__"
-            [azurerm_virtual_wan]="Microsoft.Network/virtualWans"
-            [azurerm_virtual_hub]="Microsoft.Network/virtualHubs"
-            [azurerm_express_route_gateway]="Microsoft.Network/expressRouteGateways"
-            [azurerm_vpn_gateway]="Microsoft.Network/vpnGateways"
-            [azurerm_firewall]="Microsoft.Network/azureFirewalls"
-            [azurerm_firewall_policy]="Microsoft.Network/firewallPolicies"
-            [azurerm_bastion_host]="Microsoft.Network/bastionHosts"
-            [azurerm_virtual_network]="Microsoft.Network/virtualNetworks"
-            [azurerm_network_ddos_protection_plan]="Microsoft.Network/ddosProtectionPlans"
-            [azurerm_public_ip]="Microsoft.Network/publicIPAddresses"
-            [azurerm_private_dns_resolver]="Microsoft.Network/dnsResolvers"
+          # ── Helpers ─────────────────────────────────────────────
+
+          # Import a single resource into Terraform state.
+          # Fast path:  terraform import  (validates full config graph)
+          # Slow path:  import block + targeted apply  (evaluates only
+          #             the target resource & its deps — avoids for_each
+          #             errors in unrelated modules)
+          import_resource() {
+            local addr="$1" id="$2"
+            echo "→  ${addr}"
+            echo "   ID: ${id}"
+
+            if terraform import -var-file="${TFVARS_FILE}" "${addr}" "${id}" 2>/dev/null; then
+              echo "   ✅ Imported"
+              return 0
+            fi
+
+            echo "   ⚠️  Direct import blocked — retrying with targeted apply..."
+            cat > _auto_import.tf <<IMPEOF
+          import {
+            to = ${addr}
+            id = "${id}"
+          }
+          IMPEOF
+
+            local rc=0
+            terraform apply -target="${addr}" -var-file="${TFVARS_FILE}" -auto-approve 2>&1 || rc=$?
+            rm -f _auto_import.tf
+
+            if [[ $rc -eq 0 ]]; then
+              echo "   ✅ Imported via targeted apply"
+              return 0
+            fi
+            echo "   ❌ Failed — may need manual intervention"
+            return 1
+          }
+
+          # Look up a resource in Azure; prints its resource ID on success.
+          find_in_azure() {
+            local tf_type="$1" name="$2" rg="$3" azapi_type="${4:-}" parent_id="${5:-}"
+
+            # Resource groups
+            if [[ "$tf_type" == "azurerm_resource_group" ]]; then
+              local id="/subscriptions/${SUB_ID}/resourceGroups/${name}"
+              az group show --name "$name" --subscription "$SUB_ID" &>/dev/null && echo "$id" && return 0
+              return 1
+            fi
+
+            # azapi_resource — build ID from parent + type + name
+            if [[ "$tf_type" == "azapi_resource" && -n "$parent_id" && -n "$azapi_type" ]]; then
+              local segs id
+              segs=$(echo "$azapi_type" | tr '/' '\n' | wc -l)
+              if (( segs > 2 )); then
+                id="${parent_id}/$(echo "$azapi_type" | rev | cut -d/ -f1 | rev)/${name}"
+              else
+                id="${parent_id}/providers/${azapi_type}/${name}"
+              fi
+              az resource show --ids "$id" --subscription "$SUB_ID" &>/dev/null && echo "$id" && return 0
+              return 1
+            fi
+
+            # azurerm_* — search Azure by name (scoped to RG when known)
+            local found=""
+            if [[ -n "$rg" ]]; then
+              found=$(az resource list --name "$name" -g "$rg" --subscription "$SUB_ID" \
+                      --query "[0].id" -o tsv 2>/dev/null || true)
+            fi
+            if [[ -z "$found" ]]; then
+              found=$(az resource list --name "$name" --subscription "$SUB_ID" \
+                      --query "[0].id" -o tsv 2>/dev/null || true)
+            fi
+            [[ -n "$found" ]] && echo "$found" && return 0
+            return 1
+          }
+
+          # Remove azapi state entries whose Azure resource was deleted
+          clean_stale_azapi() {
+            local entries removed=0
+            entries=$(terraform state list 2>/dev/null | grep 'azapi_resource\.' || true)
+            [[ -z "$entries" ]] && return
+            while IFS= read -r addr; do
+              local rid
+              rid=$(terraform state show "$addr" 2>/dev/null \
+                    | grep '^\s*id\s*=' | head -1 \
+                    | sed 's/.*"\(.*\)"/\1/' || true)
+              [[ -z "$rid" ]] && continue
+              if ! az resource show --ids "$rid" --subscription "$SUB_ID" &>/dev/null; then
+                echo "  🗑 Removing stale: $addr"
+                terraform state rm "$addr" 2>/dev/null || true
+                removed=$((removed + 1))
+              fi
+            done <<< "$entries"
+            echo "  Cleaned $removed stale entry/entries."
+          }
+
+          # ── Phase 0: Clean stale state entries ──────────────────
+          echo "Phase 0 — Cleaning stale state entries..."
+          clean_stale_azapi
+
+          # ── Phase 1: Bootstrap resource groups ──────────────────
+          # RG names are extracted from the tfvars file and imported
+          # first so the main plan has a better chance of succeeding.
+          echo ""
+          echo "Phase 1 — Bootstrapping resource groups..."
+          declare -A RG_MAP=(
+            [networking_resource_group_name]="azurerm_resource_group.networking"
+            [dns_resource_group_name]="azurerm_resource_group.dns[0]"
           )
+          for var_name in "${!RG_MAP[@]}"; do
+            rg_name=$(awk -F'"' "/${var_name}/"'{print $2}' "${TFVARS_FILE}" 2>/dev/null || true)
+            [[ -z "$rg_name" ]] && continue
+            addr="${RG_MAP[$var_name]}"
 
+            if terraform state show "$addr" &>/dev/null 2>&1; then
+              echo "  ✓ $addr already in state"
+              continue
+            fi
+
+            rg_id="/subscriptions/${SUB_ID}/resourceGroups/${rg_name}"
+            if az group show --name "$rg_name" --subscription "$SUB_ID" &>/dev/null; then
+              import_resource "$addr" "$rg_id" && TOTAL=$((TOTAL + 1))
+            else
+              echo "  ✓ $rg_name not in Azure — will be created"
+            fi
+          done
+
+          # ── Phase 2: Multi-pass plan-based discovery & import ───
           for PASS in $(seq 1 $MAX_PASSES); do
             echo ""
-            echo "========================================="
+            echo "═══════════════════════════════════════════"
             echo " Pass ${PASS} / ${MAX_PASSES}"
-            echo "========================================="
+            echo "═══════════════════════════════════════════"
 
-            # ── Plan ────────────────────────────────────
-            # -refresh=false avoids azapi provider "Missing Resource
-            # Identity After Read" errors on partially imported state
-            # (e.g. VNet imported but child subnets not yet).
-            terraform plan -out=tfplan -refresh=false -var-file="${TFVARS_FILE}" 2>&1 | tail -20
-            terraform show -json tfplan > plan.json
+            rm -f tfplan plan.json _auto_import.tf
 
-            # ── Extract resources planned for creation ──────────
-            # Captures both azurerm_* and azapi_resource types so
-            # the workflow handles any resource the AVM module uses.
+            # Plan may fail (e.g. for_each errors) — that's OK if it
+            # still wrote a plan file (partial plans are still useful).
+            terraform plan -out=tfplan -refresh=false \
+              -var-file="${TFVARS_FILE}" 2>&1 | tail -30 || true
+
+            if [[ ! -f tfplan ]]; then
+              echo "⚠️  Plan did not produce output — retrying next pass"
+              continue
+            fi
+            if ! terraform show -json tfplan > plan.json 2>/dev/null; then
+              echo "⚠️  Cannot parse plan — retrying next pass"
+              continue
+            fi
+
+            # Extract resources Terraform wants to create
             CREATES=$(jq -c '[
-              .resource_changes[] |
-              select(.change.actions == ["create"]) |
-              select(.type | startswith("azurerm_") or . == "azapi_resource") |
-              {
-                address:    .address,
-                type:       .type,
-                name:       .change.after.name,
-                rg:         .change.after.resource_group_name,
-                location:   .change.after.location,
-                azapi_type: (if .type == "azapi_resource" then (.change.after.type // "" | split("@")[0]) else null end),
-                parent_id:  (if .type == "azapi_resource" then .change.after.parent_id else null end)
-              }
+              .resource_changes[]
+              | select(.change.actions == ["create"])
+              | select(.type | startswith("azurerm_") or . == "azapi_resource")
+              | {
+                  address:    .address,
+                  type:       .type,
+                  name:       (.change.after.name // null),
+                  rg:         (.change.after.resource_group_name // null),
+                  azapi_type: (if .type == "azapi_resource"
+                               then (.change.after.type // "" | split("@")[0])
+                               else null end),
+                  parent_id:  (if .type == "azapi_resource"
+                               then .change.after.parent_id
+                               else null end)
+                }
             ]' plan.json)
 
             COUNT=$(echo "$CREATES" | jq 'length')
             if [[ "$COUNT" -eq 0 ]]; then
-              echo "✅ No resources to create — state is fully reconciled."
+              echo "✅ State is fully reconciled — nothing to create."
               break
             fi
             echo "Found $COUNT resource(s) planned for creation."
 
             PASS_IMPORTED=0
             for i in $(seq 0 $((COUNT - 1))); do
-              RESOURCE=$(echo "$CREATES" | jq -c ".[$i]")
-              ADDRESS=$(echo "$RESOURCE" | jq -r '.address')
-              TYPE=$(echo "$RESOURCE"    | jq -r '.type')
-              NAME=$(echo "$RESOURCE"    | jq -r '.name // empty')
-              RG=$(echo "$RESOURCE"      | jq -r '.rg // empty')
+              ROW=$(echo "$CREATES" | jq -c ".[$i]")
+              ADDR=$(echo "$ROW"  | jq -r '.address')
+              TYPE=$(echo "$ROW"  | jq -r '.type')
+              NAME=$(echo "$ROW"  | jq -r '.name // empty')
+              RG=$(echo "$ROW"    | jq -r '.rg // empty')
+              AT=$(echo "$ROW"    | jq -r '.azapi_type // empty')
+              PID=$(echo "$ROW"   | jq -r '.parent_id // empty')
 
-              RESOURCE_ID=""
-              EXISTS=false
+              [[ -z "$NAME" ]] && echo "⏭  $ADDR — name unknown, deferring" && continue
 
-              # ── azapi_resource (subnets, route tables, etc.) ──
-              if [[ "$TYPE" == "azapi_resource" ]]; then
-                AZAPI_TYPE=$(echo "$RESOURCE" | jq -r '.azapi_type // empty')
-                PARENT_ID=$(echo "$RESOURCE"  | jq -r '.parent_id // empty')
-
-                if [[ -z "$NAME" || -z "$PARENT_ID" || -z "$AZAPI_TYPE" ]]; then
-                  echo "⏭  $ADDRESS — parent_id or name not resolvable yet, deferring to next pass"
-                  continue
-                fi
-
-                # Build the Azure resource ID from parent + type + name.
-                # Child resources (3+ segments e.g. .../virtualNetworks/subnets):
-                #   {parent_id}/{lastSegment}/{name}
-                # Top-level resources (2 segments e.g. Microsoft.Network/virtualNetworks):
-                #   {parent_id}/providers/{type}/{name}
-                SEGMENT_COUNT=$(echo "$AZAPI_TYPE" | tr '/' '\n' | wc -l)
-                if [[ $SEGMENT_COUNT -gt 2 ]]; then
-                  CHILD_SEGMENT=$(echo "$AZAPI_TYPE" | rev | cut -d'/' -f1 | rev)
-                  RESOURCE_ID="${PARENT_ID}/${CHILD_SEGMENT}/${NAME}"
-                else
-                  RESOURCE_ID="${PARENT_ID}/providers/${AZAPI_TYPE}/${NAME}"
-                fi
-
-                if az resource show --ids "$RESOURCE_ID" --subscription "$SUB_ID" &>/dev/null; then
-                  EXISTS=true
-                fi
-
-              # ── azurerm_* resources ───────────────────────────
+              AZURE_ID=$(find_in_azure "$TYPE" "$NAME" "$RG" "$AT" "$PID" 2>/dev/null) || true
+              if [[ -n "$AZURE_ID" ]]; then
+                import_resource "$ADDR" "$AZURE_ID" && PASS_IMPORTED=$((PASS_IMPORTED + 1))
               else
-                # Skip if name unknown at plan time
-                if [[ -z "$NAME" ]]; then
-                  echo "⏭  $ADDRESS — name not known at plan time, skipping"
-                  continue
-                fi
-
-                # Skip unsupported resource types
-                if [[ ! -v "AZ_TYPES[$TYPE]" ]]; then
-                  echo "⏭  $ADDRESS — unsupported type ($TYPE), skipping"
-                  continue
-                fi
-
-                AZ_TYPE="${AZ_TYPES[$TYPE]}"
-
-                # ── Check Azure for existing resource ─────
-                if [[ "$TYPE" == "azurerm_resource_group" ]]; then
-                  RESOURCE_ID="/subscriptions/${SUB_ID}/resourceGroups/${NAME}"
-                  if az group show --name "$NAME" --subscription "$SUB_ID" &>/dev/null; then
-                    EXISTS=true
-                  fi
-
-                elif [[ -n "$RG" ]]; then
-                  # RG name known — build ID directly
-                  RESOURCE_ID="/subscriptions/${SUB_ID}/resourceGroups/${RG}/providers/${AZ_TYPE}/${NAME}"
-                  if az resource show --ids "$RESOURCE_ID" --subscription "$SUB_ID" &>/dev/null; then
-                    EXISTS=true
-                  fi
-
-                else
-                  # RG unknown — discover by name + type across the subscription
-                  echo "  🔍 Searching subscription ${SUB_ID} for ${AZ_TYPE}/${NAME}..."
-                  FOUND_ID=$(az resource list \
-                    --name "$NAME" \
-                    --resource-type "$AZ_TYPE" \
-                    --subscription "$SUB_ID" \
-                    --query "[0].id" -o tsv 2>/dev/null || true)
-                  if [[ -n "$FOUND_ID" ]]; then
-                    RESOURCE_ID="$FOUND_ID"
-                    EXISTS=true
-                  else
-                    echo "  🔍 Not found via az resource list, trying direct ID..."
-                    # Try all RGs from the plan for this resource type
-                    POSSIBLE_RGS=$(jq -r '[
-                      .resource_changes[] |
-                      select(.change.actions == ["create"]) |
-                      select(.type == "azurerm_resource_group") |
-                      .change.after.name // empty
-                    ] | unique[]' plan.json 2>/dev/null || true)
-                    for POSSIBLE_RG in $POSSIBLE_RGS; do
-                      TRY_ID="/subscriptions/${SUB_ID}/resourceGroups/${POSSIBLE_RG}/providers/${AZ_TYPE}/${NAME}"
-                      if az resource show --ids "$TRY_ID" --subscription "$SUB_ID" &>/dev/null; then
-                        RESOURCE_ID="$TRY_ID"
-                        EXISTS=true
-                        break
-                      fi
-                    done
-                    # Also try with RGs already in state
-                    if ! $EXISTS; then
-                      STATE_RGS=$(terraform state list 2>/dev/null \
-                        | grep 'azurerm_resource_group\.' \
-                        | xargs -I{} terraform state show {} 2>/dev/null \
-                        | grep '^\s*name\s*=' | sed 's/.*"\(.*\)"/\1/' || true)
-                      for STATE_RG in $STATE_RGS; do
-                        TRY_ID="/subscriptions/${SUB_ID}/resourceGroups/${STATE_RG}/providers/${AZ_TYPE}/${NAME}"
-                        if az resource show --ids "$TRY_ID" --subscription "$SUB_ID" &>/dev/null; then
-                          RESOURCE_ID="$TRY_ID"
-                          EXISTS=true
-                          break
-                        fi
-                      done
-                    fi
-                  fi
-                fi
-              fi
-
-              # ── Import or skip ────────────────────────
-              if $EXISTS; then
-                echo "→ Importing: $ADDRESS"
-                echo "  Azure ID:  $RESOURCE_ID"
-                if terraform import -var-file="${TFVARS_FILE}" "$ADDRESS" "$RESOURCE_ID"; then
-                  echo "  ✅ Imported"
-                  PASS_IMPORTED=$((PASS_IMPORTED + 1))
-                else
-                  echo "  ❌ Import failed — may need manual intervention"
-                fi
-              else
-                echo "✓  $ADDRESS ($NAME) — not found in Azure, will be created"
+                echo "✓  $ADDR ($NAME) — not in Azure, will be created"
               fi
             done
 
-            TOTAL_IMPORTED=$((TOTAL_IMPORTED + PASS_IMPORTED))
+            TOTAL=$((TOTAL + PASS_IMPORTED))
+            echo ""
+            echo "Pass $PASS: imported $PASS_IMPORTED | Total: $TOTAL"
 
-            if [[ "$PASS_IMPORTED" -eq 0 ]]; then
-              echo ""
-              echo "No new imports this pass — remaining resources are genuinely new."
+            if [[ $PASS_IMPORTED -eq 0 ]]; then
+              echo "No new imports — remaining resources are genuinely new."
               break
             fi
-            echo "Imported $PASS_IMPORTED resource(s) this pass. Re-planning to resolve dependencies..."
+            echo "Re-planning to resolve dependencies..."
           done
 
+          # ── Cleanup ─────────────────────────────────────────────
           echo ""
-          echo "========================================="
-          echo " Import complete: $TOTAL_IMPORTED resource(s) adopted"
-          echo "========================================="
+          echo "Post-import — cleaning stale entries..."
+          clean_stale_azapi
+          rm -f tfplan plan.json _auto_import.tf
 
-      - name: Remove Remaining Stale Resources from State
-        run: |
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          # Second cleanup pass — catches any azapi resources that
-          # became stale during the import loop (e.g. parent imported
-          # but child subnets were deleted from Azure).
-          SUB_ID="${ARM_SUBSCRIPTION_ID}"
-          REMOVED=0
-
-          AZAPI_ENTRIES=$(terraform state list 2>/dev/null | grep 'azapi_resource\.' || true)
-          if [[ -z "$AZAPI_ENTRIES" ]]; then
-            echo "No stale azapi resources."
-            exit 0
-          fi
-
-          while IFS= read -r ADDR; do
-            RESOURCE_ID=$(terraform state show "$ADDR" 2>/dev/null \
-              | grep '^\s*id\s*=' | head -1 \
-              | sed 's/.*"\(.*\)"/\1/' || true)
-            if [[ -n "$RESOURCE_ID" ]]; then
-              if ! az resource show --ids "$RESOURCE_ID" --subscription "$SUB_ID" &>/dev/null; then
-                echo "🗑  $ADDR — removing stale entry"
-                terraform state rm "$ADDR" 2>/dev/null || true
-                REMOVED=$((REMOVED + 1))
-              fi
-            fi
-          done <<< "$AZAPI_ENTRIES"
-
-          echo "Removed $REMOVED stale resource(s)."
+          echo ""
+          echo "════════════════════════════════════════════"
+          echo " Import complete — $TOTAL resource(s) adopted"
+          echo "════════════════════════════════════════════"
 
       - name: Final Plan (verify)
         run: terraform plan -var-file="${TFVARS_FILE}"
