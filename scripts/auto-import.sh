@@ -119,11 +119,13 @@ for PASS in 1 2; do
 
     echo "    📥 $ADDR"
     echo "       → $AZ_ID"
-    if terraform import -input=false -var-file="$VAR_FILE" "$ADDR" "$AZ_ID" &>/dev/null; then
-      PASS_IMPORTS=$((PASS_IMPORTS + 1))
-    else
-      echo "    ⚠️  Import failed"
-    fi
+    IMPORT_OUT=$(terraform import -input=false -var-file="$VAR_FILE" "$ADDR" "$AZ_ID" 2>&1) || {
+      # Show only the error lines, skip the noisy refresh/read lines
+      IMPORT_ERR=$(echo "$IMPORT_OUT" | grep -iE 'Error|Cannot import' | head -3)
+      echo "    ⚠️  Import failed: ${IMPORT_ERR:-unknown error}"
+      continue
+    }
+    PASS_IMPORTS=$((PASS_IMPORTS + 1))
   done
 
   LAST_PASS_IMPORTS=$PASS_IMPORTS
