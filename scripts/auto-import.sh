@@ -152,18 +152,17 @@ if [[ "$TOTAL_IMPORTS" -gt 0 ]]; then
   terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
 fi
 
-# Destroy safety check
-DESTROY_COUNT=$(terraform show -json tfplan \
-  | jq '[.resource_changes[] | select(.change.actions[] == "delete")] | length')
-if [[ "$DESTROY_COUNT" -gt 0 ]]; then
-  echo "::warning::⚠️ Plan will DESTROY $DESTROY_COUNT resource(s) — review carefully!"
-fi
-
 # Plan summary
+PLAN_JSON=$(terraform show -json tfplan)
+IMPORT_N=$(echo "$PLAN_JSON" | jq '[.resource_changes[] | select(.change.importing != null)] | length')
+CREATE_N=$(echo "$PLAN_JSON" | jq '[.resource_changes[] | select(.change.actions == ["create"]) | select(.change.importing == null)] | length')
+UPDATE_N=$(echo "$PLAN_JSON" | jq '[.resource_changes[] | select(.change.actions == ["update"])] | length')
+DESTROY_N=$(echo "$PLAN_JSON" | jq '[.resource_changes[] | select(.change.actions | index("delete"))] | length')
+
+echo ""
+echo "  📥 Import: $IMPORT_N  ➕ Create: $CREATE_N  🔄 Update: $UPDATE_N  🗑️  Destroy: $DESTROY_N"
+
+[[ "$DESTROY_N" -gt 0 ]] && echo "::warning::⚠️ Plan will DESTROY $DESTROY_N resource(s) — review carefully!"
+
 echo ""
 terraform show tfplan 2>&1 | tf_quiet | tail -5
-
-echo ""
-echo "═══════════════════════════════════════"
-echo " Done — $TOTAL_IMPORTS import(s) queued in plan"
-echo "═══════════════════════════════════════"
