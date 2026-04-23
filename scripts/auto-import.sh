@@ -141,25 +141,39 @@ if [[ "$SKIP_REFRESH" != "true" ]]; then
   echo " Refreshing state against Azure..."
   echo "═══════════════════════════════════════"
 
+  REFRESH_RC=0
+  set +e
   REFRESH_OUT=$(terraform plan -refresh-only -var-file="$VAR_FILE" -input=false -out=tfrefresh 2>&1)
+  REFRESH_RC=$?
+  set -e
   echo "$REFRESH_OUT" | tf_quiet
 
-  # Check if refresh found any drift at all
-  REFRESH_CHANGES=$(terraform show -json tfrefresh 2>/dev/null | jq '
-    [.resource_changes[]
-     | select(.change.actions != ["no-op"])
-    ] | length' 2>/dev/null || echo "0")
-
-  if [[ "$REFRESH_CHANGES" -gt 0 ]]; then
-    echo "  ⚡ Refresh detected $REFRESH_CHANGES resource(s) with drift"
-    echo "  Applying refresh to sync state with Azure..."
-    terraform apply -refresh-only -var-file="$VAR_FILE" -input=false -auto-approve 2>&1 | tf_quiet
-    echo "  ✅ State refreshed — removed stale entries"
+  if [[ "$REFRESH_RC" -ne 0 ]]; then
+    echo "  ⚠️  Refresh-only plan failed (exit $REFRESH_RC) — continuing without refresh"
+    echo "  Hint: this often happens when resources were deleted outside Terraform."
+    echo "  The main plan will still detect drift and reconcile state."
+    rm -f tfrefresh
   else
-    echo "  ✅ State is consistent with Azure"
-  fi
+    # Check if refresh found any drift at all
+    REFRESH_CHANGES=$(terraform show -json tfrefresh 2>/dev/null | jq '
+      [.resource_changes[]
+       | select(.change.actions != ["no-op"])
+      ] | length' 2>/dev/null || echo "0")
 
-  rm -f tfrefresh
+    if [[ "$REFRESH_CHANGES" -gt 0 ]]; then
+      echo "  ⚡ Refresh detected $REFRESH_CHANGES resource(s) with drift"
+      echo "  Applying refresh to sync state with Azure..."
+      if terraform apply -refresh-only -var-file="$VAR_FILE" -input=false -auto-approve 2>&1 | tf_quiet; then
+        echo "  ✅ State refreshed — removed stale entries"
+      else
+        echo "  ⚠️  Refresh apply failed — continuing with main plan"
+      fi
+    else
+      echo "  ✅ State is consistent with Azure"
+    fi
+
+    rm -f tfrefresh
+  fi
 fi
 
 # Phase 1 — Import: find resources in Azure not yet in state
@@ -179,7 +193,18 @@ for PASS in $(seq 1 $MAX_PASSES); do
   fi
   echo "═══════════════════════════════════════"
 
-  terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
+  set +e
+  PLAN_OUT=$(terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1)
+  PLAN_RC=$?
+  set -e
+  echo "$PLAN_OUT" | tf_quiet
+
+  if [[ "$PLAN_RC" -ne 0 ]]; then
+    echo ""
+    echo "  ❌ terraform plan failed (exit $PLAN_RC)"
+    echo "$PLAN_OUT" | tail -40
+    exit 1
+  fi
 
   CREATES=$(extract_creates)
   COUNT=$(echo "$CREATES" | jq 'length')
@@ -233,7 +258,16 @@ if [[ "$TOTAL_IMPORTS" -gt 0 ]]; then
   echo "═══════════════════════════════════════"
   echo " Final plan with $TOTAL_IMPORTS import(s)..."
   echo "═══════════════════════════════════════"
-  terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
+  set +e
+  PLAN_OUT=$(terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1)
+  PLAN_RC=$?
+  set -e
+  echo "$PLAN_OUT" | tf_quiet
+  if [[ "$PLAN_RC" -ne 0 ]]; then
+    echo "  ❌ Final plan failed (exit $PLAN_RC)"
+    echo "$PLAN_OUT" | tail -40
+    exit 1
+  fi
 fi
 
 # Plan summary
