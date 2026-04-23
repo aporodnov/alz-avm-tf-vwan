@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # auto-import.sh — Sync Terraform state with Azure
 #
-# Runs terraform plan, finds resources that exist in Azure but are missing
-# from state, imports them via CLI, then produces a final clean plan.
-# Two passes handle parent→child dependency chains (e.g., VNet → Subnet).
+# Runs terraform plan, finds resources planned for "create" that already
+# exist in Azure, writes import {} blocks to a temp .tf file, then
+# re-plans. The import blocks are processed as part of the plan graph,
+# which correctly resolves for_each / depends_on chains.
 #
 # Usage: auto-import.sh <var-file>
 # Requires: ARM_SUBSCRIPTION_ID env var, authenticated az CLI, terraform init done
@@ -78,32 +79,25 @@ extract_creates() {
 
 # ── Main ─────────────────────────────────────────────────────
 
-TOTAL_IMPORTED=0
-LAST_PASS_IMPORTS=0
+IMPORTS_FILE="imports_auto.tf"
+rm -f "$IMPORTS_FILE"
 
-for PASS in 1 2; do
-  echo ""
-  echo "═══════════════════════════════════════"
-  if [[ "$PASS" -eq 1 ]]; then
-    echo " Planning..."
-  else
-    echo " Re-planning after imports..."
-  fi
-  echo "═══════════════════════════════════════"
+echo ""
+echo "═══════════════════════════════════════"
+echo " Planning..."
+echo "═══════════════════════════════════════"
 
-  terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
+terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
 
-  CREATES=$(extract_creates)
-  COUNT=$(echo "$CREATES" | jq 'length')
+CREATES=$(extract_creates)
+COUNT=$(echo "$CREATES" | jq 'length')
 
-  if [[ "$COUNT" -eq 0 ]]; then
-    echo "  ✅ No resources to create — state is in sync"
-    break
-  fi
-
+if [[ "$COUNT" -eq 0 ]]; then
+  echo "  ✅ No resources to create — state is in sync"
+else
   echo "  $COUNT resource(s) to create — checking Azure..."
 
-  PASS_IMPORTS=0
+  IMPORT_COUNT=0
 
   for i in $(seq 0 $((COUNT - 1))); do
     ROW=$(echo "$CREATES" | jq -c ".[$i]")
@@ -117,31 +111,24 @@ for PASS in 1 2; do
     AZ_ID=$(resolve_azure_id "$TYPE" "$NAME" "$RG" "$PID" "$AT" 2>/dev/null) || continue
     exists_in_azure "$TYPE" "$AZ_ID" "$NAME" || continue
 
-    echo "    📥 $ADDR"
+    echo "    🔄 $ADDR"
     echo "       → $AZ_ID"
-    IMPORT_OUT=$(terraform import -input=false -var-file="$VAR_FILE" "$ADDR" "$AZ_ID" 2>&1) || {
-      # Show only the error lines, skip the noisy refresh/read lines
-      IMPORT_ERR=$(echo "$IMPORT_OUT" | grep -iE 'Error|Cannot import' | head -3)
-      echo "    ⚠️  Import failed: ${IMPORT_ERR:-unknown error}"
-      continue
-    }
-    PASS_IMPORTS=$((PASS_IMPORTS + 1))
+    cat >> "$IMPORTS_FILE" <<EOF
+import {
+  to = ${ADDR}
+  id = "${AZ_ID}"
+}
+EOF
+    IMPORT_COUNT=$((IMPORT_COUNT + 1))
   done
 
-  LAST_PASS_IMPORTS=$PASS_IMPORTS
-  TOTAL_IMPORTED=$((TOTAL_IMPORTED + PASS_IMPORTS))
-
-  [[ "$PASS_IMPORTS" -eq 0 ]] && break
-  echo "  Imported $PASS_IMPORTS resource(s)"
-done
-
-# Final clean plan if last pass imported resources (state changed since last plan)
-if [[ "$LAST_PASS_IMPORTS" -gt 0 ]]; then
-  echo ""
-  echo "═══════════════════════════════════════"
-  echo " Final Plan ($TOTAL_IMPORTED import(s))"
-  echo "═══════════════════════════════════════"
-  terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
+  if [[ "$IMPORT_COUNT" -gt 0 ]]; then
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo " Re-planning with $IMPORT_COUNT import(s)..."
+    echo "═══════════════════════════════════════"
+    terraform plan -var-file="$VAR_FILE" -out=tfplan -input=false 2>&1 | tf_quiet
+  fi
 fi
 
 # Destroy safety check
@@ -157,5 +144,5 @@ terraform show tfplan 2>&1 | tf_quiet | tail -5
 
 echo ""
 echo "═══════════════════════════════════════"
-echo " Done — $TOTAL_IMPORTED resource(s) imported"
+echo " Done — ${IMPORT_COUNT:-0} import(s) queued in plan"
 echo "═══════════════════════════════════════"

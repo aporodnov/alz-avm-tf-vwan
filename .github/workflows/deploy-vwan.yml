@@ -76,7 +76,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ inputs.profile }}
-          path: tfplan
+          path: |
+            tfplan
+            imports_auto.tf
           retention-days: 1
 
   apply:
@@ -108,6 +110,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tfplan-${{ inputs.profile }}
+
+      - name: Restore Imports File
+        run: |
+          # imports_auto.tf must be present for apply if the plan included imports
+          if [[ -f imports_auto.tf ]]; then
+            echo "Restored imports_auto.tf ($(grep -c '^import' imports_auto.tf) import blocks)"
+          else
+            echo "No imports file — clean plan"
+          fi
 
       - name: Terraform Apply
         run: |
