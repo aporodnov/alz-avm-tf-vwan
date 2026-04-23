@@ -77,7 +77,19 @@ virtual_hubs = {
 
     private_dns_zones = {
       auto_registration_zone_enabled = false
-      private_link_excluded_zones    = []
+
+      # Exclude the bugged AVM zone (tip1 instead of prod) and add the correct one below.
+      private_link_excluded_zones = [
+        "azure_power_bi_power_query",  # AVM bug: deploys privatelink.tip1.powerquery.microsoft.com instead of privatelink.prod.powerquery.microsoft.com
+      ]
+
+      # Add the correct Power BI Power Query zone that the AVM module gets wrong.
+      private_link_private_dns_zones_additional = {
+        azure_power_bi_power_query_correct = {
+          zone_name = "privatelink.prod.powerquery.microsoft.com"
+        }
+      }
+
       virtual_network_link_additional_virtual_networks = {
         # "spoke" = {
         #   virtual_network_resource_id = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>"
