@@ -66,19 +66,18 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
 
-      - name: Plan & Sync State
+      - name: Terraform Plan
         run: |
-          chmod +x scripts/auto-import.sh
-          scripts/auto-import.sh "${TFVARS_FILE}"
+          set -o pipefail
+          terraform plan -var-file="${TFVARS_FILE}" -out=tfplan -input=false 2>&1 \
+            | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'
 
       - name: Upload Plan Artifact
         if: inputs.mode == 'Plan & Apply'
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ inputs.profile }}
-          path: |
-            tfplan
-            imports_auto.tf
+          path: tfplan
           retention-days: 1
 
   apply:
@@ -111,16 +110,8 @@ jobs:
         with:
           name: tfplan-${{ inputs.profile }}
 
-      - name: Restore Imports File
-        run: |
-          if [[ -f imports_auto.tf ]]; then
-            echo "$(grep -c '^import' imports_auto.tf) import block(s) to apply"
-          else
-            echo "Clean plan — no imports"
-          fi
-
       - name: Terraform Apply
         run: |
           set -o pipefail
-          terraform apply tfplan 2>&1 \
+          terraform apply -input=false -auto-approve tfplan 2>&1 \
             | grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)'

@@ -60,146 +60,53 @@ jobs:
 
       - name: Generate Drift Report
         run: |
-          #!/usr/bin/env bash
           set -euo pipefail
-
-          # ─────────────────────────────────────────────────────
-          # READ-ONLY: This workflow never modifies Azure or state.
-          # It only reports what the deploy workflow would do.
-          # ─────────────────────────────────────────────────────
-
-          SUB_ID="${ARM_SUBSCRIPTION_ID}"
 
           tf_quiet() {
             grep -vE '(Reading\.\.\.|Read complete|modtm_module_source|azapi_client_config|azurerm_client_config\.telemetry)' || true
           }
 
-          find_in_azure() {
-            local tf_type="$1" name="$2" rg="$3" azapi_type="${4:-}" parent_id="${5:-}"
-
-            if [[ "$tf_type" == "azurerm_resource_group" ]]; then
-              az group show --name "$name" --subscription "$SUB_ID" &>/dev/null && return 0
-              return 1
-            fi
-            if [[ "$tf_type" == "azapi_resource" && -n "$parent_id" && -n "$azapi_type" ]]; then
-              local segs id
-              segs=$(echo "$azapi_type" | tr '/' '\n' | wc -l)
-              if (( segs > 2 )); then
-                id="${parent_id}/$(echo "$azapi_type" | rev | cut -d/ -f1 | rev)/${name}"
-              else
-                id="${parent_id}/providers/${azapi_type}/${name}"
-              fi
-              az resource show --ids "$id" --subscription "$SUB_ID" &>/dev/null && return 0
-              return 1
-            fi
-            local found=""
-            if [[ -n "$rg" ]]; then
-              found=$(az resource list --name "$name" -g "$rg" --subscription "$SUB_ID" \
-                      --query "[0].id" -o tsv 2>/dev/null || true)
-            fi
-            if [[ -z "$found" ]]; then
-              found=$(az resource list --name "$name" --subscription "$SUB_ID" \
-                      --query "[0].id" -o tsv 2>/dev/null || true)
-            fi
-            [[ -n "$found" ]] && return 0
-            return 1
-          }
-
           echo "Running plan..."
+          set +e
           terraform plan -out=_report.tfplan \
-            -var-file="${TFVARS_FILE}" 2>&1 | tf_quiet | tail -5 || true
+            -var-file="${TFVARS_FILE}" -input=false -detailed-exitcode 2>&1 | tf_quiet | tail -10
+          PLAN_RC=$?
+          set -e
 
           if [[ ! -f _report.tfplan ]]; then
             echo "❌ Plan failed — cannot generate report"
             exit 1
           fi
+
           terraform show -json _report.tfplan > _report.json 2>/dev/null
 
-          # Categorize planned changes (only real Azure resources — skip telemetry, random_uuid, etc.)
-          CREATES=$(jq -c '[.resource_changes[]
-            | select(.change.actions == ["create"])
-            | select(.type | startswith("azurerm_") or . == "azapi_resource")
-            | select(.change.after.name != null and .change.after.name != "")
-            | {address: .address, type: .type, name: .change.after.name, rg: (.change.after.resource_group_name // null), azapi_type: (if .type == "azapi_resource" then (.change.after.type // "" | split("@")[0]) else null end), parent_id: (if .type == "azapi_resource" then .change.after.parent_id else null end)}]' _report.json)
-          UPDATES=$(jq '[.resource_changes[]
-            | select(.change.actions == ["update"] or .change.actions == ["delete","create"])
-            | select(.type | startswith("azurerm_") or . == "azapi_resource")
-            | .address]' _report.json)
-          DELETES=$(jq '[.resource_changes[]
-            | select(.change.actions == ["delete"])
-            | select(.type | startswith("azurerm_") or . == "azapi_resource")
-            | .address]' _report.json)
-          NOOPS=$(jq '[.resource_changes[]
-            | select(.change.actions == ["no-op"] or .change.actions == ["read"])
-            | select(.type | startswith("azurerm_") or . == "azapi_resource")
-            | .address] | length' _report.json)
-
-          COUNT=$(echo "$CREATES" | jq 'length')
-          IMPORT_CANDIDATES=0
-          NEW_RESOURCES=0
+          CREATE_N=$(jq '[.resource_changes[] | select(.change.actions == ["create"]) | select(.type | startswith("azurerm_") or . == "azapi_resource")] | length' _report.json)
+          UPDATE_N=$(jq '[.resource_changes[] | select(.change.actions == ["update"] or .change.actions == ["delete","create"]) | select(.type | startswith("azurerm_") or . == "azapi_resource")] | length' _report.json)
+          DELETE_N=$(jq '[.resource_changes[] | select(.change.actions == ["delete"]) | select(.type | startswith("azurerm_") or . == "azapi_resource")] | length' _report.json)
+          NOOP_N=$(jq '[.resource_changes[] | select(.change.actions == ["no-op"] or .change.actions == ["read"]) | select(.type | startswith("azurerm_") or . == "azapi_resource")] | length' _report.json)
+          IMPORT_N=$(jq '[.resource_changes[] | select(.change.importing != null)] | length' _report.json)
 
           echo ""
           echo "╔══════════════════════════════════════════════════╗"
-          echo "║       State Drift Report — ${{ inputs.profile }}              ║"
+          echo "║  Drift Report — ${{ inputs.profile }}"
           echo "╠══════════════════════════════════════════════════╣"
-          echo ""
-
-          if [[ "$COUNT" -gt 0 ]]; then
-            echo "📋 Azure resources Terraform wants to CREATE ($COUNT):"
-            echo ""
-
-            for i in $(seq 0 $((COUNT - 1))); do
-              ROW=$(echo "$CREATES" | jq -c ".[$i]")
-              ADDR=$(echo "$ROW" | jq -r '.address')
-              TYPE=$(echo "$ROW" | jq -r '.type')
-              NAME=$(echo "$ROW" | jq -r '.name // empty')
-              RG=$(echo "$ROW"   | jq -r '.rg // empty')
-              AT=$(echo "$ROW"   | jq -r '.azapi_type // empty')
-              PID=$(echo "$ROW"  | jq -r '.parent_id // empty')
-
-              if [[ -n "$NAME" ]] && find_in_azure "$TYPE" "$NAME" "$RG" "$AT" "$PID" 2>/dev/null; then
-                echo "  🔄 $ADDR ($NAME) — EXISTS in Azure, will be auto-imported"
-                IMPORT_CANDIDATES=$((IMPORT_CANDIDATES + 1))
-              else
-                echo "  🆕 $ADDR ($NAME) — new, will be created"
-                NEW_RESOURCES=$((NEW_RESOURCES + 1))
-              fi
-            done
-            echo ""
-          fi
-
-          UPDATE_COUNT=$(echo "$UPDATES" | jq 'length')
-          if [[ "$UPDATE_COUNT" -gt 0 ]]; then
-            echo "✏️  Resources to UPDATE ($UPDATE_COUNT):"
-            echo "$UPDATES" | jq -r '.[] | "  • \(.)"'
-            echo ""
-          fi
-
-          DELETE_COUNT=$(echo "$DELETES" | jq 'length')
-          if [[ "$DELETE_COUNT" -gt 0 ]]; then
-            echo "⚠️  Resources to DELETE ($DELETE_COUNT):"
-            echo "$DELETES" | jq -r '.[] | "  • \(.)"'
-            echo ""
-          fi
-
-          echo "╠══════════════════════════════════════════════════╣"
-          echo "║  Summary                                         ║"
-          echo "╠══════════════════════════════════════════════════╣"
-          echo "  In sync:            $NOOPS"
-          echo "  Auto-import:        $IMPORT_CANDIDATES"
-          echo "  New (will create):  $NEW_RESOURCES"
-          echo "  Update:             $UPDATE_COUNT"
-          echo "  Delete:             $DELETE_COUNT"
+          echo "  In sync:   $NOOP_N"
+          echo "  Import:    $IMPORT_N"
+          echo "  Create:    $CREATE_N"
+          echo "  Update:    $UPDATE_N"
+          echo "  Delete:    $DELETE_N"
           echo "╚══════════════════════════════════════════════════╝"
-          echo ""
 
-          if [[ $IMPORT_CANDIDATES -gt 0 ]]; then
-            echo "ℹ️  The deploy workflow will auto-import existing resources."
-            echo "   Run '2 - Deploy vWAN Network' with Plan mode first to review."
+          if [[ $DELETE_N -gt 0 ]]; then
+            echo ""
+            echo "⚠️  Resources to DELETE:"
+            jq -r '[.resource_changes[] | select(.change.actions == ["delete"]) | select(.type | startswith("azurerm_") or . == "azapi_resource") | .address] | .[] | "  • \(.)"' _report.json
           fi
 
-          if [[ $DELETE_COUNT -gt 0 ]]; then
-            echo "⚠️  $DELETE_COUNT resource(s) will be DELETED — review carefully!"
+          if [[ $CREATE_N -gt 0 ]]; then
+            echo ""
+            echo "Resources to CREATE:"
+            jq -r '[.resource_changes[] | select(.change.actions == ["create"]) | select(.type | startswith("azurerm_") or . == "azapi_resource") | .address] | .[] | "  • \(.)"' _report.json
           fi
 
           rm -f _report.tfplan _report.json
