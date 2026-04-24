@@ -99,5 +99,5 @@ locals {
 import {
   for_each = local._dns_zone_imports
   to       = module.vwan.module.private_dns_zones["cc-hub01"].module.avm_res_network_privatednszone[each.key].module.virtual_network_links["sidecar-ce-vnet"].azapi_resource.private_dns_zone_network_link
-  id       = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/DNS-RG/providers/Microsoft.Network/privateDnsZones/${each.value}/virtualNetworkLinks/vnet_link-${each.key}-sidecar-ce-vnet"
+  id       = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/DNS-RG/providers/Microsoft.Network/privateDnsZones/${each.value}/virtualNetworkLinks/vnet_link-${each.key}-sidecar-ce-vnet?api-version=2024-06-01"
 }
