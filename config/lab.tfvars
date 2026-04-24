@@ -158,9 +158,9 @@ virtual_hubs = {
         }
       }
       virtual_network_link_additional_virtual_networks = {
-        # "spoke" = {
-        #   virtual_network_resource_id = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>"
-        # }
+        "sidecar-ce-vnet" = {
+          virtual_network_resource_id = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/AVNM-RG/providers/Microsoft.Network/virtualNetworks/vnet-sidecar-ce-cloud"
+        }
       }
     }
     private_dns_resolver = {
@@ -182,7 +182,11 @@ virtual_hubs = {
             "default" = {
               name                                     = "frs-cc-cloud"
               link_with_outbound_endpoint_virtual_network = true
-              additional_virtual_network_links = {}
+              additional_virtual_network_links = {
+                "ce-sidecar" = {
+                  virtual_network_resource_id = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/AVNM-RG/providers/Microsoft.Network/virtualNetworks/vnet-sidecar-ce-cloud"
+                }
+              }
               rules = {
                 "onprem-contoso" = {
                   domain_name              = "contoso.local."
