@@ -184,7 +184,7 @@ virtual_hubs = {
               link_with_outbound_endpoint_virtual_network = true
               additional_virtual_network_links = {
                 "ce-sidecar" = {
-                  virtual_network_resource_id = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/AVNM-RG/providers/Microsoft.Network/virtualNetworks/vnet-sidecar-ce-cloud"
+                  vnet_id = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/AVNM-RG/providers/Microsoft.Network/virtualNetworks/vnet-sidecar-ce-cloud"
                 }
               }
               rules = {
