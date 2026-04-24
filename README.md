@@ -15,7 +15,7 @@ and the resource appears; set it to `false` and it's skipped entirely.
 
 | Resource | Purpose |
 |---|---|
-| **Resource Groups** | `AVNM-RG` for networking, `DNS-RG` for DNS (optional) |
+| **Resource Groups** | `VWAN-RG` for networking, `DNS-RG` for DNS (optional) |
 | **Virtual WAN** | The top-level vWAN container (`Standard` type) |
 | **Virtual Hubs** | One per region (e.g. Canada Central + Canada East) — each gets its own address space |
 | **Sidecar VNet** | A spoke VNet peered to the hub, hosts Bastion, DNS resolver subnets, and any future workloads |
@@ -74,7 +74,7 @@ or `variables.tf` — just adjust the values in your profile file.
 ### Global Settings (top of the tfvars file)
 
 ```hcl
-networking_resource_group_name = "AVNM-RG"       # RG for vWAN + hubs + VNets
+networking_resource_group_name = "VWAN-RG"        # RG for vWAN + hubs + VNets
 dns_resource_group_name        = "DNS-RG"         # RG for DNS zones + resolver (set to null to skip)
 location                       = "canadacentral"  # Default region
 virtual_wan_name               = "vwan01"
