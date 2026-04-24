@@ -1,5 +1,6 @@
 # Temporary import blocks for DNS zone VNet links that exist in Azure
 # but are missing from Terraform state due to azapi polling race condition.
+# Uses azapi identity-based import (bypasses broken ImportState method).
 # Remove this file after a successful apply.
 
 locals {
@@ -99,5 +100,8 @@ locals {
 import {
   for_each = local._dns_zone_imports
   to       = module.vwan.module.private_dns_zones["cc-hub01"].module.avm_res_network_privatednszone[each.key].module.virtual_network_links["sidecar-ce-vnet"].azapi_resource.private_dns_zone_network_link
-  id       = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/DNS-RG/providers/Microsoft.Network/privateDnsZones/${each.value}/virtualNetworkLinks/vnet_link-${each.key}-sidecar-ce-vnet?api-version=2024-06-01"
+  identity = {
+    type = "Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01"
+    id   = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/DNS-RG/providers/Microsoft.Network/privateDnsZones/${each.value}/virtualNetworkLinks/vnet_link-${each.key}-sidecar-ce-vnet"
+  }
 }
