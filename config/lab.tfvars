@@ -157,11 +157,7 @@ virtual_hubs = {
           zone_name = "privatelink.prod.powerquery.microsoft.com"
         }
       }
-      virtual_network_link_additional_virtual_networks = {
-        "sidecar-ce-vnet" = {
-          virtual_network_resource_id = "/subscriptions/e6f19bf3-8bef-4939-95dc-b7b7092ea430/resourceGroups/AVNM-RG/providers/Microsoft.Network/virtualNetworks/vnet-sidecar-ce-cloud"
-        }
-      }
+      virtual_network_link_additional_virtual_networks = {}
     }
     private_dns_resolver = {
       name                             = "dnspr-cc-cloud"
