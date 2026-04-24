@@ -2,7 +2,7 @@
 # Lab profile
 # ─────────────────────────────────────────────────────────────
 
-networking_resource_group_name = "AVNM-RG"
+networking_resource_group_name = "VWAN-RG"
 dns_resource_group_name = "DNS-RG"
 
 location            = "canadacentral"
